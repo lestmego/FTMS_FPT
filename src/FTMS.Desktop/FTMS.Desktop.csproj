@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\FTMS.Domain\FTMS.Domain.csproj" />
+    <ProjectReference Include="..\FTMS.Application\FTMS.Application.csproj" />
+    <ProjectReference Include="..\FTMS.Infrastructure\FTMS.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>..\..\picture\ftms-app.ico</ApplicationIcon>
+    <AssemblyName>FTMS.Companion</AssemblyName>
+    <Product>FTMS Companion</Product>
+    <Company>FPT</Company>
+    <Description>Ứng dụng theo dõi ticket FTMS và gửi thông báo Telegram.</Description>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\picture\ftms-app.ico" Link="ftms-app.ico" />
+  </ItemGroup>
+
+</Project>

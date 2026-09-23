@@ -1,0 +1,23 @@
+<Window x:Class="FTMS.Desktop.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Cài đặt" Width="500" Height="650" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" Background="#F5F5F7" FontFamily="Segoe UI Variable Display">
+    <Grid Margin="30"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel><TextBlock Text="Cài đặt thông báo" FontSize="28" FontWeight="SemiBold" Foreground="#172522"/>
+            <TextBlock Text="Telegram và khởi động cùng Windows" Margin="0,7,0,0" Foreground="#6B7773"/></StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,32,0,0">
+            <TextBlock Text="Telegram bot token" FontWeight="SemiBold" Foreground="#263B35"/><PasswordBox x:Name="TokenBox" Margin="0,8,0,22" Padding="13" FontSize="14"/>
+            <TextBlock Text="Telegram chat ID" FontWeight="SemiBold" Foreground="#263B35"/><TextBox x:Name="ChatIdBox" Margin="0,8,0,22" Padding="13" FontSize="14"/>
+            <Separator Margin="0,2,0,20" Background="#E1E1E4"/>
+            <TextBlock Text="Tự động làm mới danh sách FTMS" FontWeight="SemiBold" Foreground="#263B35"/>
+            <CheckBox x:Name="AutoRefreshCheck" Content="Bật tự động làm mới" Margin="0,10,0,14" FontSize="14" Foreground="#263B35"/>
+            <TextBlock Text="Thời gian làm mới (giây)" Foreground="#66706D"/>
+            <TextBox x:Name="RefreshSecondsBox" Margin="0,8,0,22" Padding="13" FontSize="14"/>
+            <CheckBox x:Name="StartupCheck" Content="Khởi động ứng dụng cùng Windows" FontSize="14" Foreground="#263B35"/>
+            <Border Margin="0,28,0,0" Padding="16" Background="#E4ECE8" CornerRadius="6"><TextBlock TextWrapping="Wrap" Foreground="#486059"
+                Text="API thời gian thực gửi thông báo ngay khi có thay đổi. Tự động làm mới chỉ bấm nút Tải lại của danh sách FTMS theo số giây đã đặt và sẽ tạm dừng khi bạn đang thao tác."/></Border>
+        </StackPanel>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Hủy" Click="Cancel" Padding="20,10" Margin="0,0,10,0" Background="Transparent" BorderBrush="#AEB9B5"/>
+            <Button Content="Lưu cài đặt" Click="Save" Padding="20,10" Background="#D96B3B" Foreground="White" BorderThickness="0"/>
+        </StackPanel>
+    </Grid>
+</Window>

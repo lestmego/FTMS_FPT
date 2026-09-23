@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.db
+*.log
+App/
+installer/publish/
+*.lnk
