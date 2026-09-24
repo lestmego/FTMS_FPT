@@ -16,14 +16,8 @@ public sealed class TicketChangeDetector
             if (old is null)
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal)) continue;
-                var initialEmail = await client.GetLatestEmailAsync(snapshot.Code, cancellationToken);
                 var listEmail = snapshot.LatestEmail.IsExcluded() ? null : snapshot.LatestEmail;
-                var email = initialEmail.IsExcluded() ? listEmail : initialEmail is null ? listEmail : initialEmail with
-                {
-                    From = listEmail?.From ?? initialEmail.From,
-                    Subject = initialEmail.Subject ?? listEmail?.Subject,
-                    Body = initialEmail.Body ?? listEmail?.Body
-                };
+                var email = listEmail;
                 events.Add(Create(snapshot with { LatestEmail = email }, TicketEventType.Created, null, "Phát hiện ticket mới", email));
                 continue;
             }
@@ -74,12 +68,14 @@ public sealed class TicketChangeDetector
                 var reminderBucket = unassignedMinutes / 5;
                 if (reminderBucket >= 1)
                 {
-                    var email = await LatestEmailAsync();
-                    var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
+                    var enriched = snapshot with
+                    {
+                        LatestEmail = snapshot.LatestEmail.IsExcluded() ?
+                            (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) : snapshot.LatestEmail
+                    };
                     events.Add(Create(enriched, TicketEventType.UnassignedReminder, old.Status,
                         $"Ticket chưa được nhận sau {unassignedMinutes} phút", null,
                         discriminator: $"unassigned-{reminderBucket}"));
-                    emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
             }
 
@@ -90,17 +86,16 @@ public sealed class TicketChangeDetector
                 var responseBucket = responseMinutes / 5;
                 if (responseBucket >= 1)
                 {
-                    var email = await LatestEmailAsync();
                     var enriched = snapshot with
                     {
-                        LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail),
+                        LatestEmail = snapshot.LatestEmail.IsExcluded() ?
+                            (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) : snapshot.LatestEmail,
                         ResponseReminderEmailId = old.ResponseReminderEmailId,
                         ResponseReminderSince = old.ResponseReminderSince
                     };
                     events.Add(Create(enriched, TicketEventType.ResponseReminder, old.Status,
                         $"Ticket đã có phản hồi mới {responseMinutes} phút", null,
                         discriminator: $"response-{old.ResponseReminderEmailId}-{responseBucket}"));
-                    emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
             }
 
@@ -109,7 +104,7 @@ public sealed class TicketChangeDetector
                 if (snapshot.SlaType == 2 && old.SlaDeviationMinutes > threshold &&
                     snapshot.SlaDeviationMinutes is > 0 && snapshot.SlaDeviationMinutes <= threshold)
                 {
-                    var email = await client.GetLatestEmailAsync(snapshot.Code, cancellationToken);
+                    var email = await LatestEmailAsync();
                     var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
                     events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, $"Còn {threshold} phút đến hạn SLA", enriched.LatestEmail, threshold.ToString()));
                 }
@@ -118,7 +113,7 @@ public sealed class TicketChangeDetector
             if (snapshot.SlaType == 3 && old.SlaType != 3 &&
                 !snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
             {
-                var email = await client.GetLatestEmailAsync(snapshot.Code, cancellationToken);
+                var email = await LatestEmailAsync();
                 var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
                 events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, "Ticket đã quá hạn SLA",
                     enriched.LatestEmail, "overdue"));

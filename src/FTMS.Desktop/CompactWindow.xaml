@@ -9,6 +9,8 @@
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions><RowDefinition Height="72"/><RowDefinition Height="*"/><RowDefinition Height="28"/></Grid.RowDefinitions>
+        <wv2:WebView2 x:Name="MonitorWebView" Width="1" Height="1" IsHitTestVisible="False"
+                      HorizontalAlignment="Left" VerticalAlignment="Bottom" Panel.ZIndex="-1"/>
         <Border Background="#FBFBFD" BorderBrush="#E1E1E5" BorderThickness="0,0,0,1">
             <Grid Margin="14,0"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">

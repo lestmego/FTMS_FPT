@@ -7,11 +7,15 @@ namespace FTMS.Desktop;
 
 public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsClient
 {
-    public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
+    private DateTimeOffset _lastLoginRecoveryAt = DateTimeOffset.MinValue;
+
+    public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
     {
-        var url = webView.Source?.AbsoluteUri ?? string.Empty;
-        return Task.FromResult(url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) &&
-            !url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) && !url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase));
+        cancellationToken.ThrowIfCancellationRequested();
+        var url = await webView.Dispatcher.InvokeAsync(() => webView.Source?.AbsoluteUri ?? string.Empty);
+        return url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) &&
+            !url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) &&
+            !url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken)
@@ -22,6 +26,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                 alarmType: '0', isSortByDate: '' });
               const xhr = new XMLHttpRequest();
+              xhr.__ftmsCompanionInternal = true;
               xhr.open('POST', '/ihub/request/GetListRequestV12', false);
               xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
               xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -109,6 +114,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   page: String(page), pageSize: String(pageSize), search: '', isMyTicket: '', isAkabot: '',
                   strStatus: '', strRegionID: '', linkDeptId: '', alarmType: '0', isSortByDate: '' });
                 const nextRequest = new XMLHttpRequest();
+                nextRequest.__ftmsCompanionInternal = true;
                 nextRequest.open('POST', '/ihub/request/GetListRequestV12', false);
                 nextRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                 nextRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -160,6 +166,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   take: '1000', skip: '0', page: '1', pageSize: '1000'
                 });
                 const historyRequest = new XMLHttpRequest();
+                historyRequest.__ftmsCompanionInternal = true;
                 historyRequest.open('GET', '/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), false);
                 historyRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
                 historyRequest.send();
@@ -199,7 +206,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               return JSON.stringify({ data: allTickets, count: allTickets.length });
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteJsonStringAsync(script, "tickets", TimeSpan.FromSeconds(45), cancellationToken);
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         if (root.ValueKind == JsonValueKind.String)
@@ -242,7 +249,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const body = new URLSearchParams({ take: '500', skip: '0', page: '1', pageSize: '500',
                   search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                   alarmType: '0', isSortByDate: '' });
-                const xhr = new XMLHttpRequest(); xhr.open('POST', '/ihub/request/GetListRequestV12', false);
+                const xhr = new XMLHttpRequest(); xhr.__ftmsCompanionInternal = true; xhr.open('POST', '/ihub/request/GetListRequestV12', false);
                 xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                 xhr.send(body.toString());
                 if (xhr.status >= 200 && xhr.status < 300) result = JSON.parse(xhr.responseText);
@@ -291,7 +298,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 slaDeviationMinutes: x.slaDeviation ?? x.SlaDeviation, slaType: x.typeSLA ?? x.TypeSLA })));
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteJsonStringAsync(script, "tickets-legacy", TimeSpan.FromSeconds(30), cancellationToken);
         return DeserializeTickets(json);
     }
 
@@ -340,7 +347,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (!fileId) return '';
                   const request = new XMLHttpRequest();
                   request.open('GET', '/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), false);
-                  request.send();
+                  try { request.send(); }
+                  catch { return ''; }
                   if (request.status < 200 || request.status >= 300) return '';
                   let content = request.responseText || '';
                   try {
@@ -354,7 +362,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (!emailId) return null;
                   const request = new XMLHttpRequest();
                   request.open('GET', '/ihub/email/index/' + encodeURIComponent(emailId), false);
-                  request.send();
+                  try { request.send(); }
+                  catch { return null; }
                   if (request.status < 200 || request.status >= 300) return null;
                   const doc = new DOMParser().parseFromString(request.responseText, 'text/html');
                   const value = selector => {
@@ -419,8 +428,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         plainBody.includes('phân công nhân sự xử lý theo rq');
                       if (standardReceipt || technicalReceipt || assignmentReceipt) {
                         const original = quotedOriginal(body, mail.subject || mail.Subject || null);
-                        if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from))
+                        if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from)) {
                           return JSON.stringify({ id: String(mail.id || mail.Id || '') + ':quoted', ...original });
+                        }
                         continue;
                       }
                       const fallbackDate = Object.entries(mail).find(([key, fieldValue]) =>
@@ -508,8 +518,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     /ihub\.akabot2@fpt\.com/i.test(body || '') || standardReceipt || technicalReceipt || assignmentReceipt;
                   if (isExcluded) {
                     const original = quotedOriginal(body, field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE'));
-                    if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from))
+                    if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from)) {
                       return JSON.stringify({ id: String(field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID') || fileId || '') + ':quoted', ...original });
+                    }
                     continue;
                   }
                   const quoted = (!sender || !sentAt) ? quotedOriginal(body, field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || detail?.subject || null) : null;
@@ -519,10 +530,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || detail?.subject || null, body });
                 }
                 return JSON.stringify(null);
-              } catch { return JSON.stringify(null); }
+              } catch {
+                return JSON.stringify(null);
+              }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteJsonStringAsync(script, $"email:{ticketCode}", TimeSpan.FromSeconds(20), cancellationToken);
         return DeserializeLatestEmail(json);
     }
 
@@ -559,7 +572,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               } catch { return JSON.stringify(null); }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteJsonStringAsync(script, $"status-history:{ticketCode}", TimeSpan.FromSeconds(20), cancellationToken);
         if (string.IsNullOrWhiteSpace(json) || json == "null") return null;
         try
         {
@@ -579,18 +592,40 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         catch (JsonException) { return null; }
     }
 
-    public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken)
+    public async Task BeginLoginRecoveryAsync(CancellationToken cancellationToken)
     {
-        webView.Dispatcher.Invoke(() => webView.Source = new Uri(ftmsUrl));
-        return Task.CompletedTask;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (DateTimeOffset.Now - _lastLoginRecoveryAt < TimeSpan.FromSeconds(10)) return;
+        _lastLoginRecoveryAt = DateTimeOffset.Now;
+        await webView.Dispatcher.InvokeAsync(() =>
+        {
+            var currentUrl = webView.Source?.AbsoluteUri ?? string.Empty;
+            var onLoginPage = currentUrl.Contains("login", StringComparison.OrdinalIgnoreCase) ||
+                currentUrl.Contains("adfs", StringComparison.OrdinalIgnoreCase) ||
+                currentUrl.Contains("/id/", StringComparison.OrdinalIgnoreCase);
+            if (!onLoginPage) webView.Source = new Uri(ftmsUrl);
+        });
     }
 
-    private async Task<string> ExecuteJsonStringAsync(string script)
+    private async Task<string> ExecuteJsonStringAsync(string script, string operationName, TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(script));
-        var raw = await operation;
-        try { return JsonSerializer.Deserialize<string>(raw) ?? "null"; }
-        catch (JsonException) { return raw; }
+        try
+        {
+            var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(script));
+            var raw = await operation.WaitAsync(timeout, cancellationToken);
+            try { return JsonSerializer.Deserialize<string>(raw) ?? "null"; }
+            catch (JsonException) { return raw; }
+        }
+        catch (TimeoutException)
+        {
+            _ = webView.Dispatcher.InvokeAsync(() => webView.Reload());
+            throw new TimeoutException($"FTMS API timeout: {operationName}");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
