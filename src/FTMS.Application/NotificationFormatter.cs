@@ -129,8 +129,9 @@ public static partial class NotificationFormatter
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
             if (index <= 20) continue;
             var previousLine = value.LastIndexOf('\n', index - 1);
-            var signatureStart = previousLine > 0 ? value.LastIndexOf('\n', previousLine - 1) : previousLine;
-            value = value[..Math.Max(0, signatureStart)].Trim();
+            var signatureStart = previousLine > 0 ? value.LastIndexOf('\n', previousLine - 1) : -1;
+            if (signatureStart < 0) signatureStart = previousLine >= 0 ? previousLine + 1 : index;
+            value = value[..signatureStart].Trim();
         }
         value = value.Length > 2500 ? value[..2500] + "..." : value;
         return value;
