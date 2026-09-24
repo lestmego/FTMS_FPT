@@ -109,7 +109,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             x.UpdatedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == vietnamToday);
         SummaryChanged?.Invoke(new DashboardSummary(
             tickets.Count,
-            tickets.Count(x => x.Status == TicketStatus.New),
+            tickets.Count(x => (x.Status is TicketStatus.New or TicketStatus.Assigned) &&
+                (x.AssigneeId is null or 0) && (string.IsNullOrWhiteSpace(x.AssigneeName) || x.AssigneeName.Trim() == "---")),
             tickets.Count(x => x.Status == TicketStatus.Assigned),
             tickets.Count(x => x.Status == TicketStatus.InProgress),
             tickets.Count(x => x.Status == TicketStatus.Paused),
