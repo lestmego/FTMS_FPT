@@ -14,25 +14,25 @@ public static partial class NotificationFormatter
         var text = new StringBuilder();
         text.AppendLine(item.EventType switch
         {
-            TicketEventType.Created => "📨 <b>Ticket mới</b>",
-            TicketEventType.EmailReceived => "📧 <b>Email mới của ticket</b>",
-            TicketEventType.UnassignedReminder => "🔔 <b>Nhắc ticket chưa được nhận</b>",
-            TicketEventType.ResponseReminder => "🔔 <b>Nhắc ticket đã có phản hồi mới</b>",
-            TicketEventType.SlaThresholdReached => "⏰ <b>Cảnh báo SLA</b>",
+            TicketEventType.Created => "📨 <b>🔴 TICKET MỚI</b>",
+            TicketEventType.EmailReceived => "📧 <b>🔴 EMAIL MỚI CỦA TICKET</b>",
+            TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
+            TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+            TicketEventType.SlaThresholdReached => "⏰ <b>🔴 CẢNH BÁO SLA</b>",
             TicketEventType.Terminal => ticket.Status switch
             {
-                TicketStatus.Closed => "🔒 <b>Ticket đã đóng</b>",
-                TicketStatus.Cancelled => "🚫 <b>Ticket đã hủy</b>",
-                TicketStatus.Unprocessed => "⛔ <b>Ticket không xử lý</b>",
-                _ => "✅ <b>Ticket kết thúc</b>"
+                TicketStatus.Closed => "🔒 <b>⚫ TICKET ĐÃ ĐÓNG</b>",
+                TicketStatus.Cancelled => "🚫 <b>⚫ TICKET ĐÃ HỦY</b>",
+                TicketStatus.Unprocessed => "⛔ <b>⚫ TICKET KHÔNG XỬ LÝ</b>",
+                _ => "✅ <b>🟢 TICKET KẾT THÚC</b>"
             },
             TicketEventType.StatusChanged when ticket.Status == TicketStatus.InProgress &&
-                item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) => "📧 <b>Ticket đã có phản hồi mới</b>",
-            TicketEventType.StatusChanged => "🔄 <b>Thay đổi trạng thái</b>",
+                item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+            TicketEventType.StatusChanged => "🔄 <b>🔵 THAY ĐỔI TRẠNG THÁI</b>",
             TicketEventType.AssignmentChanged => AssignmentTitle(item),
-            _ => "📣 <b>Cập nhật ticket</b>"
+            _ => "📣 <b>🔵 CẬP NHẬT TICKET</b>"
         });
-        text.AppendLine($"🆔 <b>Mã ticket:</b> {Escape(ticket.Code)}");
+        text.AppendLine($"🆔 <b>MÃ REQUEST:</b> <code>{Escape(ticket.Code)}</code>");
         var isStatusTransition = item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal &&
             item.PreviousStatus is not null && item.PreviousStatus.Value != ticket.Status;
         if (item.EventType is not TicketEventType.Created and not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
@@ -143,10 +143,10 @@ public static partial class NotificationFormatter
     {
         var hadAssignee = !string.IsNullOrWhiteSpace(item.PreviousAssigneeName) && item.PreviousAssigneeName.Trim() != "---";
         var hasAssignee = !string.IsNullOrWhiteSpace(item.Snapshot.AssigneeName) && item.Snapshot.AssigneeName.Trim() != "---";
-        if (!hadAssignee && hasAssignee) return "🙋 <b>Ticket đã có người nhận</b>";
+        if (!hadAssignee && hasAssignee) return "🙋 <b>🟢 TICKET ĐÃ CÓ NGƯỜI NHẬN</b>";
         if (!string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName, StringComparison.OrdinalIgnoreCase))
-            return "👥 <b>Ticket đã chuyển người xử lý</b>";
-        return "🏢 <b>Ticket đã chuyển phòng ban</b>";
+            return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
+        return "🏢 <b>🔵 TICKET ĐÃ CHUYỂN PHÒNG BAN</b>";
     }
 
     private static string NormalizeEmpty(string? value, string fallback) =>

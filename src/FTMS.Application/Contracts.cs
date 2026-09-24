@@ -5,6 +5,7 @@ namespace FTMS.Application;
 public interface IFtmsClient
 {
     Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken);
+    Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken);
     Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken);
     Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken);

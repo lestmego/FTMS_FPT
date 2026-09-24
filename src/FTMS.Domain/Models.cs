@@ -108,4 +108,12 @@ public sealed record AppSettings
     public bool UnprocessedIsTerminal { get; init; } = true;
 }
 
-public sealed record DashboardSummary(int Total, int New, int Assigned, int InProgress, int Paused, int Completed, int Closed, int SlaRisk, int SlaViolated);
+public sealed record CurrentUserIdentity(long UserId, string? UserName, long? DepartmentId, string? DepartmentName);
+
+public sealed record DashboardSummary(int Total, int New, int Assigned, int InProgress, int Paused, int Completed, int Closed,
+    int SlaRisk, int SlaViolated, CurrentUserIdentity? CurrentUser = null, int PersonalAssigned = 0,
+    int PersonalInProgress = 0, int PersonalPaused = 0, int PersonalClosedToday = 0)
+{
+    public int PersonalWorkloadTotal => PersonalAssigned + PersonalInProgress + PersonalPaused;
+    public bool HasCurrentUser => CurrentUser is not null;
+}

@@ -24,7 +24,8 @@ public sealed class TelegramOutboxSender(string databasePath, Func<(string Token
             try
             {
                 var decodedMessage = WebUtility.HtmlDecode(item.Message);
-                var code = Regex.Match(decodedMessage, @"Mã (?:RQ|ticket):</b>\s*([^\s<]+)").Groups[1].Value;
+                var code = Regex.Match(decodedMessage, @"Mã (?:RQ|ticket|request):(?:</b>)?\s*(?:<code>)?([^\s<]+)",
+                    RegexOptions.IgnoreCase).Groups[1].Value;
                 var canReceive = decodedMessage.Contains("Ticket mới", StringComparison.OrdinalIgnoreCase) ||
                     decodedMessage.Contains("Nhắc ticket chưa được nhận", StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(decodedMessage,
                     @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)",

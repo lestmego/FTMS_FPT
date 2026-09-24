@@ -8,7 +8,7 @@
         <Style x:Key="ChartLabel" TargetType="TextBlock"><Setter Property="FontSize" Value="9"/><Setter Property="Foreground" Value="#6E6E73"/><Setter Property="HorizontalAlignment" Value="Center"/></Style>
     </Window.Resources>
     <Grid>
-        <Grid.RowDefinitions><RowDefinition Height="72"/><RowDefinition Height="*"/><RowDefinition Height="28"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="74"/><RowDefinition Height="*"/><RowDefinition Height="28"/></Grid.RowDefinitions>
         <wv2:WebView2 x:Name="MonitorWebView" Width="1" Height="1" IsHitTestVisible="False"
                       HorizontalAlignment="Left" VerticalAlignment="Bottom" Panel.ZIndex="-1"/>
         <Border Background="#FBFBFD" BorderBrush="#E1E1E5" BorderThickness="0,0,0,1">
@@ -19,24 +19,36 @@
                     <Button Style="{StaticResource IconButton}" ToolTip="Cài đặt" Click="OpenSettings"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE713;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Border Margin="8,0,0,0" Padding="10,6" Background="#EEF4F0" CornerRadius="6"><StackPanel Orientation="Horizontal"><Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="#D9A441" Margin="0,0,7,0"/><TextBlock x:Name="SessionText" Text="Đang kết nối" FontSize="11" Foreground="#53605B"/></StackPanel></Border>
                 </StackPanel>
-                <Border Grid.Column="2" Width="540" Height="58" Padding="10,6" Background="#FFFFFF" BorderBrush="#E5E5EA" BorderThickness="1" CornerRadius="9" VerticalAlignment="Center">
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="88"/></Grid.ColumnDefinitions>
-                        <Grid><Grid.RowDefinitions><RowDefinition Height="34"/><RowDefinition Height="8"/></Grid.RowDefinitions>
-                            <UniformGrid Columns="4">
-                                <StackPanel><TextBlock x:Name="NewValue" Text="0" Style="{StaticResource ChartValue}"/><TextBlock Text="Mới / Phân công" Style="{StaticResource ChartLabel}"/></StackPanel>
-                                <StackPanel><TextBlock x:Name="InProgressValue" Text="0" Style="{StaticResource ChartValue}"/><TextBlock Text="Đang thực hiện" Style="{StaticResource ChartLabel}"/></StackPanel>
-                                <StackPanel><TextBlock x:Name="PausedValue" Text="0" Style="{StaticResource ChartValue}"/><TextBlock Text="Tạm ngưng" Style="{StaticResource ChartLabel}"/></StackPanel>
-                                <StackPanel><TextBlock x:Name="ClosedValue" Text="0" Style="{StaticResource ChartValue}"/><TextBlock Text="Hoàn thành" Style="{StaticResource ChartLabel}"/></StackPanel>
+                <Border x:Name="DashboardCard" Grid.Column="2" Width="660" Height="64" Padding="10,5" Background="#FFFFFF" BorderBrush="#E5E5EA" BorderThickness="1" CornerRadius="9" VerticalAlignment="Center"
+                        AutomationProperties.Name="Đang tải thông tin dashboard">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="1"/><ColumnDefinition Width="*"/><ColumnDefinition Width="1"/><ColumnDefinition Width="126"/></Grid.ColumnDefinitions>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="TICKET MỚI" FontSize="10" FontWeight="SemiBold" Foreground="#52514E"/>
+                            <TextBlock x:Name="GlobalNewValue" Text="0" FontSize="22" FontWeight="SemiBold" Foreground="#1D1D1F" HorizontalAlignment="Center"/>
+                            <TextBlock Text="Tất cả" FontSize="10" Foreground="#898781" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                        <Border Grid.Column="1" Background="#E5E5EA" Margin="0,2"/>
+                        <Grid Grid.Column="2" Margin="8,0"><Grid.RowDefinitions><RowDefinition Height="18"/><RowDefinition Height="33"/></Grid.RowDefinitions>
+                            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="CÔNG VIỆC CỦA" FontSize="10" FontWeight="SemiBold" Foreground="#52514E" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="CurrentUserName" Grid.Column="1" Text="Đang nhận diện…" Margin="5,0,8,0" FontSize="11" FontWeight="SemiBold" Foreground="#1D1D1F" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal"><TextBlock Text="Đang mở " FontSize="10" Foreground="#898781"/><TextBlock x:Name="PersonalTotalValue" Text="—" FontSize="11" FontWeight="Bold" Foreground="#1D1D1F"/></StackPanel>
+                            </Grid>
+                            <UniformGrid Grid.Row="1" Columns="4">
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse Width="7" Height="7" Fill="#2A78D6" Margin="0,0,5,0"/><TextBlock x:Name="PersonalAssignedValue" Text="—" FontSize="14" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Phân công" FontSize="10" Foreground="#52514E" HorizontalAlignment="Center"/></StackPanel>
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse Width="7" Height="7" Fill="#1BAF7A" Margin="0,0,5,0"/><TextBlock x:Name="PersonalInProgressValue" Text="—" FontSize="14" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Đang thực hiện" FontSize="10" Foreground="#52514E" HorizontalAlignment="Center"/></StackPanel>
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse Width="7" Height="7" Fill="#EB6834" Margin="0,0,5,0"/><TextBlock x:Name="PersonalPausedValue" Text="—" FontSize="14" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Tạm ngưng" FontSize="10" Foreground="#52514E" HorizontalAlignment="Center"/></StackPanel>
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse Width="7" Height="7" Fill="#0CA30C" Margin="0,0,5,0"/><TextBlock x:Name="PersonalClosedTodayValue" Text="—" FontSize="14" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Đã đóng hôm nay" FontSize="10" Foreground="#52514E" HorizontalAlignment="Center"/></StackPanel>
                             </UniformGrid>
-                            <Border Grid.Row="1" CornerRadius="4" ClipToBounds="True" Background="#ECECF0">
-                                <Grid><Grid.ColumnDefinitions><ColumnDefinition x:Name="NewChartColumn" Width="1*"/><ColumnDefinition x:Name="InProgressChartColumn" Width="1*"/><ColumnDefinition x:Name="PausedChartColumn" Width="1*"/><ColumnDefinition x:Name="ClosedChartColumn" Width="1*"/></Grid.ColumnDefinitions>
-                                    <Border Background="#4A8FE7"/><Border Grid.Column="1" Background="#55A878"/><Border Grid.Column="2" Background="#D6A53A"/><Border Grid.Column="3" Background="#8E8E93"/>
-                                </Grid>
-                            </Border>
                         </Grid>
-                        <Border Grid.Column="1" Margin="10,0,0,0" Padding="7,3" Background="#FDEBEC" CornerRadius="6">
-                            <StackPanel HorizontalAlignment="Center"><TextBlock Text="Cảnh báo SLA" FontSize="9" Foreground="#A33B3B"/><TextBlock x:Name="SlaValue" Text="0" FontSize="16" FontWeight="SemiBold" Foreground="#8E2726" HorizontalAlignment="Center"/></StackPanel>
-                        </Border>
+                        <Border Grid.Column="3" Background="#E5E5EA" Margin="0,2"/>
+                        <StackPanel Grid.Column="4" VerticalAlignment="Center">
+                            <TextBlock Text="SLA CỦA TÔI" FontSize="10" FontWeight="SemiBold" Foreground="#52514E" HorizontalAlignment="Center"/>
+                            <UniformGrid Columns="2" Margin="0,3,0,0">
+                                <StackPanel HorizontalAlignment="Center"><StackPanel Orientation="Horizontal"><Ellipse Width="7" Height="7" Fill="#FAB219" Margin="0,0,5,0"/><TextBlock x:Name="SlaRiskValue" Text="0" FontSize="15" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Sắp hạn" FontSize="10" Foreground="#52514E"/></StackPanel>
+                                <StackPanel HorizontalAlignment="Center"><StackPanel Orientation="Horizontal"><Ellipse Width="7" Height="7" Fill="#D03B3B" Margin="0,0,5,0"/><TextBlock x:Name="SlaViolatedValue" Text="0" FontSize="15" FontWeight="SemiBold" Foreground="#1D1D1F"/></StackPanel><TextBlock Text="Quá hạn" FontSize="10" Foreground="#52514E"/></StackPanel>
+                            </UniformGrid>
+                        </StackPanel>
                     </Grid>
                 </Border>
             </Grid>

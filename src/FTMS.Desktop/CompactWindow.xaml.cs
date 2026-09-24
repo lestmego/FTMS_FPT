@@ -24,7 +24,10 @@ public partial class CompactWindow : Window
     private readonly HttpClient _http = new();
     private readonly string _telegramOffsetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion", "telegram.offset");
     private TicketMonitor? _monitor;
+    private WebViewFtmsClient? _ftmsClient;
     private bool _monitorStarted;
+    private bool _targetNavigationPending;
+    private bool _manualLoginNotificationShown;
     private long _telegramUpdateOffset;
     private bool _checkingTelegram;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
@@ -104,9 +107,10 @@ public partial class CompactWindow : Window
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BlockBotScript);
         var appSettings = new AppSettings { FtmsUrl = FtmsUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
         var databasePath = Path.Combine(root, "ftms.db");
-        var client = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
+        _ftmsClient = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
+        _ftmsClient.LoginRecoveryStatusChanged += OnLoginRecoveryStatusChanged;
         var telegram = new TelegramOutboxSender(databasePath, () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http);
-        _monitor = new TicketMonitor(client, new SqliteTicketStore(databasePath), telegram, new TicketChangeDetector(), appSettings);
+        _monitor = new TicketMonitor(_ftmsClient, new SqliteTicketStore(databasePath), telegram, new TicketChangeDetector(), appSettings);
         _monitor.StatusChanged += message => Dispatcher.Invoke(() => MonitorText.Text = message);
         _monitor.SummaryChanged += summary => Dispatcher.Invoke(() => UpdateDashboard(summary));
         await _monitor.InitializeAsync(_lifetime.Token);
@@ -125,13 +129,74 @@ public partial class CompactWindow : Window
         catch (Exception ex) { MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}"; }
     }
 
-    private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+    private async void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        var url = FtmsWebView.Source?.AbsoluteUri ?? "";
-        var login = url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) || url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase);
-        SessionText.Text = login ? "\u0110ang \u0111\u0103ng nh\u1eadp" : url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) ? "\u0110\u00e3 k\u1ebft n\u1ed1i" : "\u0110ang k\u1ebft n\u1ed1i";
-        StatusDot.Fill = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(login ? "#D9A441" : "#4AA47B"));
-        if (!login && url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase)) StartMonitorOnce();
+        if (_lifetime.IsCancellationRequested || _ftmsClient is null) return;
+        if (!e.IsSuccess)
+        {
+            SessionText.Text = "L\u1ed7i k\u1ebft n\u1ed1i";
+            MonitorText.Text = $"Kh\u00f4ng th\u1ec3 m\u1edf FTMS: {e.WebErrorStatus}";
+            return;
+        }
+
+        try
+        {
+            var uri = FtmsWebView.Source;
+            if (uri is null) return;
+
+            if (_ftmsClient.IsTargetUri(uri))
+            {
+                _targetNavigationPending = false;
+                _manualLoginNotificationShown = false;
+                _ftmsClient.NotifyTargetReached();
+                SetSessionStatus("\u0110\u00e3 k\u1ebft n\u1ed1i", "#4AA47B");
+                StartMonitorOnce();
+                return;
+            }
+
+            if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
+            {
+                SetSessionStatus("\u0110ang m\u1edf danh s\u00e1ch FTMS", "#D9A441");
+                if (!_targetNavigationPending)
+                {
+                    _targetNavigationPending = true;
+                    FtmsWebView.Source = new Uri(FtmsUrl);
+                }
+                return;
+            }
+
+            if (WebViewLoginRecovery.IsLoginUri(uri) || WebViewLoginRecovery.IsAdfsUri(uri))
+            {
+                SetSessionStatus("\u0110ang \u0111\u0103ng nh\u1eadp", "#D9A441");
+                await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token);
+                return;
+            }
+
+            SetSessionStatus("\u0110ang k\u1ebft n\u1ed1i", "#D9A441");
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { MonitorText.Text = $"Kh\u00f4ng th\u1ec3 t\u1ef1 \u0111\u1ed9ng \u0111\u0103ng nh\u1eadp: {ex.Message}"; }
+    }
+
+    private void OnLoginRecoveryStatusChanged(LoginRecoveryStatus status)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            MonitorText.Text = status.Message;
+            SetSessionStatus(status.RequiresUserAction ? "C\u1ea7n \u0111\u0103ng nh\u1eadp" : "\u0110ang \u0111\u0103ng nh\u1eadp", "#D9A441");
+            if (!status.RequiresUserAction || _manualLoginNotificationShown || _trayIcon is null) return;
+            _manualLoginNotificationShown = true;
+            _trayIcon.BalloonTipTitle = "FTMS c\u1ea7n x\u00e1c th\u1ef1c";
+            _trayIcon.BalloonTipText = "Vui l\u00f2ng ho\u00e0n t\u1ea5t \u0111\u0103ng nh\u1eadp ho\u1eb7c MFA trong c\u1eeda s\u1ed5 FTMS Companion.";
+            _trayIcon.ShowBalloonTip(4000);
+        });
+    }
+
+    private void SetSessionStatus(string text, string color)
+    {
+        SessionText.Text = text;
+        StatusDot.Fill = new System.Windows.Media.SolidColorBrush(
+            (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(color));
     }
 
     private void StartMonitorOnce()
@@ -308,16 +373,38 @@ public partial class CompactWindow : Window
 
     private void UpdateDashboard(DashboardSummary s)
     {
-        NewValue.Text = (s.New + s.Assigned).ToString("N0"); InProgressValue.Text = s.InProgress.ToString("N0");
-        PausedValue.Text = s.Paused.ToString("N0"); ClosedValue.Text = (s.Completed + s.Closed).ToString("N0");
-        SlaValue.Text = (s.SlaRisk + s.SlaViolated).ToString("N0");
-        var newCount = s.New + s.Assigned;
-        var closedCount = s.Completed + s.Closed;
-        var total = Math.Max(1, newCount + s.InProgress + s.Paused + closedCount);
-        NewChartColumn.Width = new GridLength(Math.Max(0.01, (double)newCount / total), GridUnitType.Star);
-        InProgressChartColumn.Width = new GridLength(Math.Max(0.01, (double)s.InProgress / total), GridUnitType.Star);
-        PausedChartColumn.Width = new GridLength(Math.Max(0.01, (double)s.Paused / total), GridUnitType.Star);
-        ClosedChartColumn.Width = new GridLength(Math.Max(0.01, (double)closedCount / total), GridUnitType.Star);
+        GlobalNewValue.Text = s.New.ToString("N0");
+
+        if (!s.HasCurrentUser)
+        {
+            CurrentUserName.Text = "Đang nhận diện người dùng…";
+            CurrentUserName.ToolTip = null;
+            PersonalTotalValue.Text = "—";
+            PersonalAssignedValue.Text = "—";
+            PersonalInProgressValue.Text = "—";
+            PersonalPausedValue.Text = "—";
+            PersonalClosedTodayValue.Text = "—";
+            SlaRiskValue.Text = "—";
+            SlaViolatedValue.Text = "—";
+            System.Windows.Automation.AutomationProperties.SetName(DashboardCard,
+                $"Ticket mới tất cả: {s.New}. Đang nhận diện người dùng. Chưa có dữ liệu SLA cá nhân.");
+            return;
+        }
+
+        var userName = string.IsNullOrWhiteSpace(s.CurrentUser!.UserName) ? "Người dùng hiện tại" : s.CurrentUser.UserName;
+        CurrentUserName.Text = userName;
+        CurrentUserName.ToolTip = userName;
+        PersonalTotalValue.Text = s.PersonalWorkloadTotal.ToString("N0");
+        PersonalAssignedValue.Text = s.PersonalAssigned.ToString("N0");
+        PersonalInProgressValue.Text = s.PersonalInProgress.ToString("N0");
+        PersonalPausedValue.Text = s.PersonalPaused.ToString("N0");
+        PersonalClosedTodayValue.Text = s.PersonalClosedToday.ToString("N0");
+        SlaRiskValue.Text = s.SlaRisk.ToString("N0");
+        SlaViolatedValue.Text = s.SlaViolated.ToString("N0");
+        System.Windows.Automation.AutomationProperties.SetName(DashboardCard,
+            $"Ticket mới tất cả: {s.New}. Công việc của {userName}: {s.PersonalAssigned} phân công, " +
+            $"{s.PersonalInProgress} đang thực hiện, {s.PersonalPaused} tạm ngưng, {s.PersonalClosedToday} đã đóng hôm nay. " +
+            $"SLA của {userName}: {s.SlaRisk} sắp hạn, {s.SlaViolated} quá hạn.");
     }
 
     private const string ApiObserverScript = """

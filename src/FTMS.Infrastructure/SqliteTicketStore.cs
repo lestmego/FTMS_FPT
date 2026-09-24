@@ -83,6 +83,13 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         await transaction.CommitAsync(ct);
     }
 
+    public Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken ct) =>
+        SaveSnapshotsAsync([snapshot], ct);
+
+    public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken ct) => ExecuteAsync(
+        "UPDATE ticket_snapshots SET is_terminal=1,terminal_at=$terminalAt WHERE code=$code", ct,
+        ("$terminalAt", terminalAt.ToString("O")), ("$code", code));
+
     public Task SaveEventAsync(TicketEvent item, CancellationToken ct) => ExecuteAsync("""
         INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at) VALUES($key,$code,$type,$payload,$detected)
         """, ct, ("$key", item.EventKey), ("$code", item.TicketCode), ("$type", item.EventType.ToString()), ("$payload", JsonSerializer.Serialize(item)), ("$detected", item.DetectedAt.ToString("O")));

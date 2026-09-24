@@ -24,7 +24,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             {
                 if (!await client.IsAuthenticatedAsync(cancellationToken))
                 {
-                    StatusChanged?.Invoke("Hết phiên đăng nhập, hệ thống đang tự động đăng nhập lại");
+                    SummaryChanged?.Invoke(UnavailableSummary());
                     await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
                 else
@@ -35,11 +35,12 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch (UnauthorizedAccessException)
             {
-                StatusChanged?.Invoke("Phiên FTMS đã hết hạn, đang kết nối đăng nhập lại");
+                SummaryChanged?.Invoke(UnavailableSummary());
                 await client.BeginLoginRecoveryAsync(cancellationToken);
             }
             catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
-            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken);
+            try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
         }
     }
 
@@ -98,6 +99,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             }
             else _active[snapshot.Code] = snapshot;
         }
+        var currentUser = await client.GetCurrentUserAsync(cancellationToken);
+        IReadOnlyList<TicketSnapshot> personal = currentUser is null
+            ? []
+            : tickets.Where(x => x.AssigneeId == currentUser.UserId).ToList();
+        var vietnamToday = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).Date;
+        var personalClosedToday = currentUser is null ? 0 : apiTickets.Count(x =>
+            x.Status == TicketStatus.Closed && x.AssigneeId == currentUser.UserId && x.UpdatedAt is not null &&
+            x.UpdatedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == vietnamToday);
         SummaryChanged?.Invoke(new DashboardSummary(
             tickets.Count,
             tickets.Count(x => x.Status == TicketStatus.New),
@@ -106,9 +115,16 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             tickets.Count(x => x.Status == TicketStatus.Paused),
             tickets.Count(x => x.Status == TicketStatus.Completed),
             tickets.Count(x => x.Status == TicketStatus.Closed),
-            tickets.Count(x => x.SlaType == 2),
-            tickets.Count(x => x.SlaType == 3)));
+            personal.Count(x => x.SlaType == 2),
+            personal.Count(x => x.SlaType == 3),
+            currentUser,
+            personal.Count(x => x.Status == TicketStatus.Assigned),
+            personal.Count(x => x.Status == TicketStatus.InProgress),
+            personal.Count(x => x.Status == TicketStatus.Paused),
+            personalClosedToday));
         await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
         StatusChanged?.Invoke($"Đồng bộ {tickets.Count} ticket, đang theo dõi {_active.Count}");
     }
+
+    private static DashboardSummary UnavailableSummary() => new(0, 0, 0, 0, 0, 0, 0, 0, 0);
 }

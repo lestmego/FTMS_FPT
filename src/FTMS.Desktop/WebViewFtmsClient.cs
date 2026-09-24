@@ -7,11 +7,45 @@ namespace FTMS.Desktop;
 
 public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsClient
 {
-    public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
+    private readonly WebViewLoginRecovery _loginRecovery = new(webView, new Uri(ftmsUrl));
+    private readonly SemaphoreSlim _identityLock = new(1, 1);
+    private CurrentUserIdentity? _currentUser;
+    private int _identityGeneration;
+
+    internal event Action<LoginRecoveryStatus>? LoginRecoveryStatusChanged
     {
-        var url = webView.Source?.AbsoluteUri ?? string.Empty;
-        return Task.FromResult(url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) &&
-            !url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) && !url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase));
+        add => _loginRecovery.StatusChanged += value;
+        remove => _loginRecovery.StatusChanged -= value;
+    }
+
+    public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
+    {
+        var uri = await webView.Dispatcher.InvokeAsync(() => webView.Source).Task.WaitAsync(cancellationToken);
+        var authenticated = uri is not null && WebViewLoginRecovery.IsFtmsIhubUri(uri);
+        if (!authenticated) InvalidateCurrentUser();
+        return authenticated;
+    }
+
+    public async Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken)
+    {
+        if (_currentUser is not null) return _currentUser;
+        await _identityLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_currentUser is not null) return _currentUser;
+            var generation = _identityGeneration;
+            foreach (var delay in new[] { TimeSpan.Zero, TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(750) })
+            {
+                if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken);
+                var json = await ExecuteJsonStringAsync(CurrentUserScript);
+                var identity = DeserializeCurrentUser(json);
+                if (identity is null) continue;
+                if (generation == _identityGeneration) _currentUser = identity;
+                return generation == _identityGeneration ? identity : null;
+            }
+            return null;
+        }
+        finally { _identityLock.Release(); }
     }
 
     public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken)
@@ -567,9 +601,65 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
     public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken)
     {
-        webView.Dispatcher.Invoke(() => webView.Source = new Uri(ftmsUrl));
-        return Task.CompletedTask;
+        InvalidateCurrentUser();
+        return _loginRecovery.BeginAsync(cancellationToken);
     }
+
+    public void NotifyTargetReached()
+    {
+        InvalidateCurrentUser();
+        _loginRecovery.NotifyTargetReached();
+    }
+
+    public bool IsTargetUri(Uri uri) => _loginRecovery.IsTargetUri(uri);
+
+    private void InvalidateCurrentUser()
+    {
+        _identityGeneration++;
+        _currentUser = null;
+    }
+
+    private static CurrentUserIdentity? DeserializeCurrentUser(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json) || json == "null") return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.String)
+            {
+                using var nested = JsonDocument.Parse(root.GetString() ?? "null");
+                root = nested.RootElement.Clone();
+            }
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("userId", out var userIdValue)) return null;
+            var userId = userIdValue.ValueKind == JsonValueKind.Number ? userIdValue.GetInt64() :
+                long.TryParse(userIdValue.ToString(), out var parsedUserId) ? parsedUserId : 0;
+            if (userId <= 0) return null;
+            string? ReadString(string name) => root.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null
+                ? string.IsNullOrWhiteSpace(value.ToString()) ? null : value.ToString().Trim() : null;
+            long? ReadLong(string name) => root.TryGetProperty(name, out var value) && long.TryParse(value.ToString(), out var parsed)
+                ? parsed : null;
+            return new CurrentUserIdentity(userId, ReadString("userName"), ReadLong("departmentId"), ReadString("departmentName"));
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private const string CurrentUserScript = """
+        (() => {
+          try {
+            const userId = Number(globalThis.userID);
+            if (!Number.isInteger(userId) || userId <= 0) return JSON.stringify(null);
+            const text = value => value == null || String(value).trim() === '' ? null : String(value).trim();
+            const departmentId = Number(globalThis.UserDept);
+            return JSON.stringify({
+              userId,
+              userName: text(globalThis.Username),
+              departmentId: Number.isFinite(departmentId) ? departmentId : null,
+              departmentName: text(globalThis.DepartmentName)
+            });
+          } catch { return JSON.stringify(null); }
+        })()
+        """;
 
     private async Task<string> ExecuteJsonStringAsync(string script)
     {
