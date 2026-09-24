@@ -103,7 +103,7 @@ public sealed record AppSettings
     public bool AutoRefreshEnabled { get; init; } = true;
     public string TelegramBotToken { get; init; } = string.Empty;
     public string TelegramChatId { get; init; } = string.Empty;
-    public int[] SlaThresholds { get; init; } = [30, 25, 20, 10, 5];
+    public int[] SlaThresholds { get; init; } = [5, 3, 1];
     public int TerminalRetentionDays { get; init; } = 30;
     public bool UnprocessedIsTerminal { get; init; } = true;
 }
