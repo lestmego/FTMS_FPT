@@ -16,8 +16,8 @@ public sealed class TicketChangeDetector
             if (old is null)
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal)) continue;
-                var listEmail = snapshot.LatestEmail.IsExcluded() ? null : snapshot.LatestEmail;
-                var email = listEmail;
+                var initialEmail = await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken);
+                var email = SelectEmail(initialEmail, snapshot.LatestEmail);
                 events.Add(Create(snapshot with { LatestEmail = email }, TicketEventType.Created, null, "Phát hiện ticket mới", email));
                 continue;
             }
@@ -28,7 +28,7 @@ public sealed class TicketChangeDetector
             async Task<LatestEmail?> LatestEmailAsync()
             {
                 if (emailFetched) return fetchedEmail;
-                fetchedEmail = SelectEmail(await client.GetLatestEmailAsync(snapshot.Code, cancellationToken), snapshot.LatestEmail, old.LatestEmail);
+                fetchedEmail = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken), snapshot.LatestEmail, old.LatestEmail);
                 emailFetched = true;
                 return fetchedEmail;
             }
@@ -37,13 +37,18 @@ public sealed class TicketChangeDetector
             {
                 var email = await LatestEmailAsync();
                 var history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken);
-                var reason = IsNewEmail(old.LatestEmail, email) ? "Có email mới gửi tới" : "FTMS không cung cấp nguyên nhân thay đổi";
+                if (history?.OccurredAt is null)
+                {
+                    await Task.Delay(300, cancellationToken);
+                    history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken) ?? history;
+                }
+                var reason = IsNewEmail(old.LatestEmail, email) ? "Có email mới trong luồng ticket" : "Trạng thái ticket đã thay đổi";
                 var isTerminal = snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal);
-                var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail), IsTerminal = isTerminal };
+                var enriched = snapshot with { LatestEmail = email, IsTerminal = isTerminal };
                 events.Add(Create(enriched, isTerminal ? TicketEventType.Terminal : TicketEventType.StatusChanged,
                     old.Status, reason, enriched.LatestEmail,
                     discriminator: history?.OccurredAt?.ToString("O") ?? snapshot.UpdatedAt?.ToString("O") ?? string.Empty,
-                    changedBy: history?.Actor ?? snapshot.UpdatedBy, changedAt: history?.OccurredAt ?? snapshot.UpdatedAt));
+                    changedBy: history?.Actor, changedAt: history?.OccurredAt));
                 emailIncludedInEvent = IsNewEmail(old.LatestEmail, email);
             }
 
@@ -51,7 +56,7 @@ public sealed class TicketChangeDetector
                 (old.AssigneeId != snapshot.AssigneeId || old.DepartmentId != snapshot.DepartmentId))
             {
                 var email = await LatestEmailAsync();
-                var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
+                var enriched = snapshot with { LatestEmail = email };
                 var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|{old.DepartmentId}>{snapshot.DepartmentId}";
                 events.Add(Create(enriched, TicketEventType.AssignmentChanged, old.Status, "Người xử lý hoặc phòng ban đã thay đổi",
                     enriched.LatestEmail, discriminator, previousAssigneeName: old.AssigneeName,
@@ -68,14 +73,12 @@ public sealed class TicketChangeDetector
                 var reminderBucket = unassignedMinutes / 5;
                 if (reminderBucket >= 1)
                 {
-                    var enriched = snapshot with
-                    {
-                        LatestEmail = snapshot.LatestEmail.IsExcluded() ?
-                            (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) : snapshot.LatestEmail
-                    };
+                    var email = await LatestEmailAsync();
+                    var enriched = snapshot with { LatestEmail = email };
                     events.Add(Create(enriched, TicketEventType.UnassignedReminder, old.Status,
                         $"Ticket chưa được nhận sau {unassignedMinutes} phút", null,
                         discriminator: $"unassigned-{reminderBucket}"));
+                    emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
             }
 
@@ -86,16 +89,17 @@ public sealed class TicketChangeDetector
                 var responseBucket = responseMinutes / 5;
                 if (responseBucket >= 1)
                 {
+                    var email = await LatestEmailAsync();
                     var enriched = snapshot with
                     {
-                        LatestEmail = snapshot.LatestEmail.IsExcluded() ?
-                            (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) : snapshot.LatestEmail,
+                        LatestEmail = email,
                         ResponseReminderEmailId = old.ResponseReminderEmailId,
                         ResponseReminderSince = old.ResponseReminderSince
                     };
                     events.Add(Create(enriched, TicketEventType.ResponseReminder, old.Status,
                         $"Ticket đã có phản hồi mới {responseMinutes} phút", null,
                         discriminator: $"response-{old.ResponseReminderEmailId}-{responseBucket}"));
+                    emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
             }
 
@@ -104,8 +108,9 @@ public sealed class TicketChangeDetector
                 if (snapshot.SlaType == 2 && old.SlaDeviationMinutes > threshold &&
                     snapshot.SlaDeviationMinutes is > 0 && snapshot.SlaDeviationMinutes <= threshold)
                 {
-                    var email = await LatestEmailAsync();
-                    var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
+                    var email = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken),
+                        snapshot.LatestEmail, old.LatestEmail);
+                    var enriched = snapshot with { LatestEmail = email };
                     events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, $"Còn {threshold} phút đến hạn SLA", enriched.LatestEmail, threshold.ToString()));
                 }
             }
@@ -113,8 +118,9 @@ public sealed class TicketChangeDetector
             if (snapshot.SlaType == 3 && old.SlaType != 3 &&
                 !snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
             {
-                var email = await LatestEmailAsync();
-                var enriched = snapshot with { LatestEmail = email ?? (old.LatestEmail.IsExcluded() ? null : old.LatestEmail) };
+                var email = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken),
+                    snapshot.LatestEmail, old.LatestEmail);
+                var enriched = snapshot with { LatestEmail = email };
                 events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, "Ticket đã quá hạn SLA",
                     enriched.LatestEmail, "overdue"));
             }
@@ -122,7 +128,7 @@ public sealed class TicketChangeDetector
             if (!emailIncludedInEvent && (old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt))
             {
                 var email = await LatestEmailAsync();
-                if (IsNewEmail(old.LatestEmail, email) && email is not null && !email.IsExcluded())
+                if (IsNewEmail(old.LatestEmail, email) && email is not null)
                 {
                     var enriched = snapshot with { LatestEmail = email };
                     events.Add(Create(enriched, TicketEventType.EmailReceived, old.Status,
@@ -134,11 +140,55 @@ public sealed class TicketChangeDetector
         return events;
     }
 
-    private static bool IsNewEmail(LatestEmail? old, LatestEmail? current) => current is not null &&
-        (old is null || !string.IsNullOrWhiteSpace(current.Id) && current.Id != old.Id || current.SentAt > old.SentAt);
+    private static bool IsNewEmail(LatestEmail? old, LatestEmail? current)
+    {
+        if (current is null || current.IsExcluded()) return false;
+        if (old is null) return true;
+        if (current.SentAt is not null && old.SentAt is not null)
+        {
+            if (current.SentAt > old.SentAt) return true;
+            if (current.SentAt < old.SentAt) return false;
+        }
+        return !string.IsNullOrWhiteSpace(current.Id) && current.Id != old.Id &&
+            (!long.TryParse(current.Id, out var currentId) || !long.TryParse(old.Id, out var oldId) || currentId > oldId);
+    }
+
+    private static async Task<LatestEmail?> FetchLatestEmailAsync(IFtmsClient client, string code, CancellationToken ct)
+    {
+        var first = await client.GetLatestEmailAsync(code, ct);
+        if (Complete(first)) return first;
+
+        await Task.Delay(300, ct);
+        var retry = await client.GetLatestEmailAsync(code, ct);
+        if (retry is null) return first;
+        if (first is null) return retry;
+        if (first.SentAt is not null && retry.SentAt is not null && retry.SentAt < first.SentAt)
+            return first;
+        if (first.SentAt is not null && retry.SentAt is not null && retry.SentAt > first.SentAt)
+            return retry;
+        if (long.TryParse(first.Id, out var firstId) && long.TryParse(retry.Id, out var retryId))
+        {
+            if (retryId < firstId) return first;
+            if (retryId > firstId) return retry;
+        }
+        return Completeness(retry) >= Completeness(first) ? retry : first;
+
+        static bool Complete(LatestEmail? email) => email is not null &&
+            !string.IsNullOrWhiteSpace(email.From) && email.SentAt is not null &&
+            !string.IsNullOrWhiteSpace(email.Body);
+        static int Completeness(LatestEmail email) =>
+            (string.IsNullOrWhiteSpace(email.From) ? 0 : 1) +
+            (email.SentAt is null ? 0 : 1) +
+            (string.IsNullOrWhiteSpace(email.Subject) ? 0 : 1) +
+            (string.IsNullOrWhiteSpace(email.Body) ? 0 : 1);
+    }
 
     private static LatestEmail? SelectEmail(params LatestEmail?[] candidates) =>
-        candidates.FirstOrDefault(email => email is not null && !email.IsExcluded());
+        (candidates.FirstOrDefault() is { } fetched && !fetched.IsExcluded() ? fetched : null) ??
+        candidates.Skip(1).Where(email => email is not null && !email.IsExcluded())
+            .OrderByDescending(email => email!.SentAt)
+            .ThenByDescending(email => long.TryParse(email!.Id, out var id) ? id : 0)
+            .FirstOrDefault();
 
     private static TicketEvent Create(TicketSnapshot snapshot, TicketEventType type, TicketStatus? previous,
         string reason, LatestEmail? email, string discriminator = "", string? changedBy = null, DateTimeOffset? changedAt = null,

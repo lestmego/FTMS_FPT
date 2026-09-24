@@ -55,8 +55,9 @@ public static partial class NotificationFormatter
         }
         else if (item.EventType != TicketEventType.Terminal || ticket.Status != TicketStatus.Closed)
             text.AppendLine($"🕰 <b>Thời gian tồn tại từ lúc nhận ticket:</b> {ageMinutes} phút");
-        if (item.ChangedAt is not null)
-            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {item.ChangedAt.Value:dd/MM/yyyy HH:mm}");
+        var changeTime = item.ChangedAt ?? (ticket.Status == TicketStatus.Closed ? ticket.UpdatedAt : null);
+        if (isStatusTransition && changeTime is not null)
+            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value, includeSeconds: false)}");
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
             if (!string.Equals(item.PreviousAssigneeName, ticket.AssigneeName, StringComparison.OrdinalIgnoreCase))
@@ -66,31 +67,40 @@ public static partial class NotificationFormatter
         }
         if (item.EventType == TicketEventType.SlaThresholdReached)
             text.AppendLine($"⚠️ <b>SLA:</b> {Escape(item.Reason)}");
-        var email = item.LatestEmail is { } validEmail && !validEmail.IsExcluded()
-            ? validEmail
-            : ticket.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded() ? snapshotEmail : null;
-        var envelope = ExtractEnvelope(email?.Body);
-        var emailFrom = string.IsNullOrWhiteSpace(email?.From) ? envelope.From : email.From;
-        var emailTime = email?.SentAt ?? envelope.SentAt;
-        text.AppendLine();
-        text.AppendLine("<blockquote>");
-        text.AppendLine($"From: {Escape(NormalizeEmpty(emailFrom, "FTMS không cung cấp"))}");
-        text.AppendLine($"Time: {(emailTime is null ? "FTMS không cung cấp" : emailTime.Value.ToString("dd/MM/yyyy HH:mm:ss"))}");
-        text.AppendLine($"📝 <b>Tiêu đề: {Escape(NormalizeEmpty(email?.Subject ?? ticket.Title, "Không có thông tin"))}</b>");
-        text.AppendLine();
-        text.AppendLine(Escape(CleanEmail(email?.Body)));
-        text.AppendLine("</blockquote>");
+        var email = item.LatestEmail is { } eventEmail && !eventEmail.IsExcluded()
+            ? eventEmail : ticket.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded()
+                ? snapshotEmail : null;
+        var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
+        var emailBody = CleanEmail(email?.Body);
+        if (email is not null || !string.IsNullOrWhiteSpace(originalTicketTitle))
+        {
+            text.AppendLine();
+            text.AppendLine("<blockquote>");
+            if (!string.IsNullOrWhiteSpace(email?.From)) text.AppendLine($"From: {Escape(email.From)}");
+            if (email?.SentAt is not null) text.AppendLine($"Time: {FormatVietnamTime(email.SentAt.Value)}");
+            if (!string.IsNullOrWhiteSpace(originalTicketTitle))
+                text.AppendLine($"📝 <b>Tiêu đề: {Escape(originalTicketTitle)}</b>");
+            if (!string.IsNullOrWhiteSpace(emailBody))
+            {
+                text.AppendLine();
+                text.AppendLine(Escape(emailBody));
+            }
+            text.AppendLine("</blockquote>");
+        }
         return text.ToString().Trim();
     }
 
     public static string CleanEmail(string? html)
     {
-        if (string.IsNullOrWhiteSpace(html)) return "Không lấy được nội dung email.";
+        if (string.IsNullOrWhiteSpace(html)) return string.Empty;
         html = LatestMessageHtmlRegex().Split(html, 2)[0];
         var value = BreakRegex().Replace(html, "\n");
         value = WebUtility.HtmlDecode(HtmlTagRegex().Replace(value, " "));
         value = LineWhitespaceRegex().Replace(value, " ");
         value = MultiLineRegex().Replace(value, "\n").Trim();
+        var quotedHeader = QuotedHeaderRegex().Match(value);
+        if (quotedHeader.Success && quotedHeader.Index > 20)
+            value = value[..quotedHeader.Index].Trim();
         foreach (var marker in new[]
         {
             "THÔNG BÁO BẢO MẬT", "THONG BAO BAO MAT", "CONFIDENTIALITY NOTICE",
@@ -141,24 +151,10 @@ public static partial class NotificationFormatter
     private static string NormalizeEmpty(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) || value.Trim() == "---" ? fallback : value.Trim();
 
-    private static (string? From, DateTimeOffset? SentAt) ExtractEnvelope(string? html)
-    {
-        if (string.IsNullOrWhiteSpace(html)) return (null, null);
-        var prepared = BreakRegex().Replace(html, "\n");
-        var text = WebUtility.HtmlDecode(HtmlTagRegex().Replace(prepared, " "));
-        text = LineWhitespaceRegex().Replace(text, " ");
-        var from = EnvelopeFromRegex().Match(text).Groups[1].Value.Trim();
-        DateTimeOffset? sentAt = null;
-        var rawDate = EnvelopeDateRegex().Match(text).Groups[1].Value.Trim();
-        if (!string.IsNullOrWhiteSpace(rawDate))
-        {
-            rawDate = OrdinalSuffixRegex().Replace(rawDate, "$1");
-            if (DateTimeOffset.TryParse(rawDate, CultureInfo.GetCultureInfo("en-US"),
-                    DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal, out var parsed))
-                sentAt = parsed;
-        }
-        return (string.IsNullOrWhiteSpace(from) ? null : from, sentAt);
-    }
+    private static string FormatVietnamTime(DateTimeOffset value, bool includeSeconds = true) =>
+        value.ToOffset(TimeSpan.FromHours(7)).ToString(includeSeconds ? "dd/MM/yyyy HH:mm:ss" : "dd/MM/yyyy HH:mm",
+            CultureInfo.InvariantCulture) +
+        " (UTC+07:00)";
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlTagRegex();
@@ -170,10 +166,6 @@ public static partial class NotificationFormatter
     private static partial Regex LineWhitespaceRegex();
     [GeneratedRegex(@"(?:\r?\n\s*){3,}")]
     private static partial Regex MultiLineRegex();
-    [GeneratedRegex(@"(?:Từ|Từ|From)\s*:\s*(?:[^\s,;<>]+\s+)?([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", RegexOptions.IgnoreCase)]
-    private static partial Regex EnvelopeFromRegex();
-    [GeneratedRegex(@"(?:Đã gửi|Đã gửi|Sent)\s*:\s*([^\r\n]+)", RegexOptions.IgnoreCase)]
-    private static partial Regex EnvelopeDateRegex();
-    [GeneratedRegex(@"(\d{1,2})(?:st|nd|rd|th)\b", RegexOptions.IgnoreCase)]
-    private static partial Regex OrdinalSuffixRegex();
+    [GeneratedRegex(@"From:\s*.{0,200}?\b(?:Sent|Date):", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex QuotedHeaderRegex();
 }

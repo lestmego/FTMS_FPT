@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace FTMS.Domain;
 
 public enum TicketStatus { New = 0, Assigned = 1, InProgress = 2, Completed = 3, Paused = 4, Closed = 5, Cancelled = 7, Unprocessed = 8 }
@@ -20,6 +22,13 @@ public sealed record LatestEmail(string? Id, DateTimeOffset? SentAt, string? Fro
 
 public static class LatestEmailExtensions
 {
+    public static bool IsIgnoredSender(this LatestEmail? email)
+    {
+        var from = email?.From?.Trim() ?? string.Empty;
+        return new[] { "fti.sd02@fpt.com", "ihub.akabot2@fpt.com", "ihub.akabot2", "ducvm19@fpt.com" }
+            .Any(sender => from.Contains(sender, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static bool IsAkabot(this LatestEmail? email) => email is not null &&
         (string.Equals(email.From?.Trim(), "ihub.akabot2@fpt.com", StringComparison.OrdinalIgnoreCase) ||
          email.Body?.Contains("ihub.akabot2@fpt.com", StringComparison.OrdinalIgnoreCase) == true);
@@ -28,6 +37,9 @@ public static class LatestEmailExtensions
     {
         if (email?.Body is null) return false;
         var body = email.Body;
+        var quoted = Regex.Match(body, @"<hr\b|-----Original Message-----|From:\s*.{0,200}?\b(?:Sent|Date):",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (quoted.Success) body = body[..quoted.Index];
         var standardReceipt = body.Contains("Thông tin yêu cầu hỗ trợ", StringComparison.OrdinalIgnoreCase) &&
             body.Contains("đã được tiếp nhận", StringComparison.OrdinalIgnoreCase) &&
             body.Contains("chuyển đến bộ phận", StringComparison.OrdinalIgnoreCase);
@@ -39,7 +51,7 @@ public static class LatestEmailExtensions
         return standardReceipt || technicalReceipt || assignmentReceipt;
     }
 
-    public static bool IsExcluded(this LatestEmail? email) => email.IsAkabot() || email.IsAutomatedAcknowledgement();
+    public static bool IsExcluded(this LatestEmail? email) => email.IsIgnoredSender() || email.IsAutomatedAcknowledgement();
 }
 
 public sealed record StatusHistoryEntry(TicketStatus Status, DateTimeOffset? OccurredAt, string? Actor);

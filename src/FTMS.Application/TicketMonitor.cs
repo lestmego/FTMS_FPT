@@ -6,20 +6,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     TicketChangeDetector detector, AppSettings settings)
 {
     private readonly Dictionary<string, TicketSnapshot> _active = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, DateTimeOffset> _emailRetryAfter = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
-    private DateTimeOffset _lastCleanupAt = DateTimeOffset.MinValue;
-
     public event Action<string>? StatusChanged;
     public event Action<DashboardSummary>? SummaryChanged;
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
-        await store.InitializeAsync(cancellationToken).ConfigureAwait(false);
-        await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken).ConfigureAwait(false);
-        _lastCleanupAt = DateTimeOffset.Now;
-        var snapshots = await store.LoadActiveSnapshotsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var item in snapshots) _active[item.Key] = item.Value;
+        await store.InitializeAsync(cancellationToken);
+        foreach (var item in await store.LoadActiveSnapshotsAsync(cancellationToken)) _active[item.Key] = item.Value;
     }
 
     public async Task RunAsync(Func<bool> userIsActive, CancellationToken cancellationToken)
@@ -28,115 +22,66 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         {
             try
             {
-                if (settings.IdleDelaySeconds > 0 && userIsActive())
+                if (!await client.IsAuthenticatedAsync(cancellationToken))
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                if (!await client.IsAuthenticatedAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    StatusChanged?.Invoke("H\u1ebft phi\u00ean \u0111\u0103ng nh\u1eadp, h\u1ec7 th\u1ed1ng \u0111ang t\u1ef1 \u0111\u1ed9ng \u0111\u0103ng nh\u1eadp l\u1ea1i");
-                    await client.BeginLoginRecoveryAsync(cancellationToken).ConfigureAwait(false);
+                    StatusChanged?.Invoke("Hết phiên đăng nhập, hệ thống đang tự động đăng nhập lại");
+                    await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
                 else
                 {
-                    await SyncNowAsync(cancellationToken).ConfigureAwait(false);
+                    await SyncNowAsync(cancellationToken);
                 }
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch (UnauthorizedAccessException)
             {
-                StatusChanged?.Invoke("Phi\u00ean FTMS \u0111\u00e3 h\u1ebft h\u1ea1n, \u0111ang k\u1ebft n\u1ed1i \u0111\u0103ng nh\u1eadp l\u1ea1i");
-                await client.BeginLoginRecoveryAsync(cancellationToken).ConfigureAwait(false);
+                StatusChanged?.Invoke("Phiên FTMS đã hết hạn, đang kết nối đăng nhập lại");
+                await client.BeginLoginRecoveryAsync(cancellationToken);
             }
-            catch (Exception ex)
-            {
-                StatusChanged?.Invoke($"L\u1ed7i: {ex.Message}");
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
+            catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken);
         }
     }
 
     public async Task SyncNowAsync(CancellationToken cancellationToken)
     {
-        if (!await _syncLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        if (!await _syncLock.WaitAsync(0, cancellationToken)) return;
         try
         {
-            await PollOnceAsync(cancellationToken).ConfigureAwait(false);
-            await sender.SendPendingAsync(cancellationToken).ConfigureAwait(false);
+            await PollOnceAsync(cancellationToken);
+            await sender.SendPendingAsync(cancellationToken);
         }
-        finally
-        {
-            _syncLock.Release();
-        }
+        finally { _syncLock.Release(); }
     }
 
     private async Task PollOnceAsync(CancellationToken cancellationToken)
     {
-        var apiTickets = await client.GetTicketsAsync(cancellationToken).ConfigureAwait(false);
+        var apiTickets = await client.GetTicketsAsync(cancellationToken);
+        // Closed history is only relevant when it closes a ticket already being monitored.
         var tickets = apiTickets.Where(item => !item.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
             _active.ContainsKey(item.Code)).ToList();
-        var events = await detector.DetectAsync(_active, tickets, client, settings, cancellationToken)
-            .ConfigureAwait(false);
+        var events = await detector.DetectAsync(_active, tickets, client, settings, cancellationToken);
         var ihubBase = new Uri(settings.FtmsUrl).GetLeftPart(UriPartial.Authority) + "/ihub";
-
-        var effectiveEvents = new List<TicketEvent>(events.Count);
-        var blockedTickets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var emailCache = new Dictionary<string, LatestEmail?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var detectedEvent in events)
+        foreach (var item in events)
         {
-            var item = detectedEvent;
-            if (!await store.EventExistsAsync(item.EventKey, cancellationToken).ConfigureAwait(false))
-            {
-                var enriched = await EnsureLatestEmailAsync(item, emailCache, cancellationToken).ConfigureAwait(false);
-                if (enriched is null)
-                {
-                    blockedTickets.Add(item.TicketCode);
-                    continue;
-                }
-                item = enriched;
-                await store.SaveEventAsync(item, cancellationToken).ConfigureAwait(false);
-                await store.EnqueueNotificationAsync(item, NotificationFormatter.Format(item, ihubBase), cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            effectiveEvents.Add(item);
+            if (await store.EventExistsAsync(item.EventKey, cancellationToken)) continue;
+            await store.SaveEventAsync(item, cancellationToken);
+            _active.TryGetValue(item.TicketCode, out var previous);
+            if (TicketNotificationFilter.ShouldNotify(item, previous))
+                await store.EnqueueNotificationAsync(item, NotificationFormatter.Format(item, ihubBase), cancellationToken);
         }
-
-        var latestEventByTicket = effectiveEvents
-            .GroupBy(item => item.TicketCode, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
-        var responseEventByTicket = effectiveEvents
-            .Where(item => item.EventType == TicketEventType.StatusChanged &&
-                item.CurrentStatus == TicketStatus.InProgress &&
-                item.Reason.Contains("email m\u1edbi", StringComparison.OrdinalIgnoreCase))
-            .GroupBy(item => item.TicketCode, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
-        var snapshots = new List<TicketSnapshot>(tickets.Count);
-
         foreach (var item in tickets)
         {
-            if (blockedTickets.Contains(item.Code)) continue;
-            latestEventByTicket.TryGetValue(item.Code, out var latestEvent);
-            responseEventByTicket.TryGetValue(item.Code, out var responseEvent);
+            var eventEmail = events.LastOrDefault(x => string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase))?.LatestEmail;
             _active.TryGetValue(item.Code, out var previous);
+            var responseEvent = events.LastOrDefault(x =>
+                string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                x.EventType == TicketEventType.StatusChanged && x.CurrentStatus == TicketStatus.InProgress &&
+                x.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase));
             var keepResponseReminder = item.Status == TicketStatus.InProgress;
             var snapshot = item with
             {
-                LatestEmail = latestEvent?.LatestEmail ??
-                    (previous?.LatestEmail.IsExcluded() == true ? null : previous?.LatestEmail),
+                LatestEmail = eventEmail ?? (previous?.LatestEmail.IsExcluded() == true ? null : previous?.LatestEmail),
                 ResponseReminderEmailId = keepResponseReminder
                     ? responseEvent?.LatestEmail?.Id ?? previous?.ResponseReminderEmailId
                     : null,
@@ -145,104 +90,25 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     : null,
                 IsTerminal = item.Status.IsTerminal(settings.UnprocessedIsTerminal)
             };
-            if (!Equals(previous, snapshot)) snapshots.Add(snapshot);
-
-            if (snapshot.IsTerminal) _active.Remove(snapshot.Code);
+            await store.SaveSnapshotAsync(snapshot, cancellationToken);
+            if (snapshot.IsTerminal)
+            {
+                _active.Remove(snapshot.Code);
+                await store.MarkTerminalAsync(snapshot.Code, DateTimeOffset.Now, cancellationToken);
+            }
             else _active[snapshot.Code] = snapshot;
         }
-
-        await store.SaveSnapshotsAsync(snapshots, cancellationToken).ConfigureAwait(false);
-        SummaryChanged?.Invoke(BuildSummary(tickets));
-
-        if (DateTimeOffset.Now - _lastCleanupAt >= TimeSpan.FromHours(12))
-        {
-            await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken).ConfigureAwait(false);
-            _lastCleanupAt = DateTimeOffset.Now;
-        }
-
-        var waitingForEmail = blockedTickets.Count == 0
-            ? string.Empty
-            : $", ch\u1edd n\u1ed9i dung email: {blockedTickets.Count}";
-        StatusChanged?.Invoke($"\u0110\u1ed3ng b\u1ed9 {tickets.Count} ticket, \u0111ang theo d\u00f5i {_active.Count}{waitingForEmail}");
-    }
-
-    private async Task<TicketEvent?> EnsureLatestEmailAsync(TicketEvent item,
-        IDictionary<string, LatestEmail?> emailCache, CancellationToken cancellationToken)
-    {
-        var current = item.LatestEmail is { } eventEmail && !eventEmail.IsExcluded()
-            ? eventEmail
-            : item.Snapshot.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded()
-                ? snapshotEmail
-                : null;
-        if (!emailCache.TryGetValue(item.TicketCode, out var detail))
-        {
-            if (!_emailRetryAfter.TryGetValue(item.TicketCode, out var retryAt) || retryAt <= DateTimeOffset.Now)
-            {
-                try
-                {
-                    detail = await client.GetLatestEmailAsync(item.TicketCode, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch
-                {
-                    detail = null;
-                }
-
-                if (HasEmailBody(detail)) _emailRetryAfter.Remove(item.TicketCode);
-                else _emailRetryAfter[item.TicketCode] = DateTimeOffset.Now.AddSeconds(2);
-            }
-            emailCache[item.TicketCode] = detail;
-        }
-
-        if (!HasEmailBody(detail)) return null;
-        var latest = detail!;
-        var merged = latest with
-        {
-            Id = string.IsNullOrWhiteSpace(latest.Id) ? current?.Id : latest.Id,
-            SentAt = latest.SentAt ?? current?.SentAt,
-            From = string.IsNullOrWhiteSpace(latest.From) ? current?.From : latest.From,
-            Subject = string.IsNullOrWhiteSpace(latest.Subject) ? current?.Subject : latest.Subject
-        };
-        return item with { LatestEmail = merged, Snapshot = item.Snapshot with { LatestEmail = merged } };
-    }
-
-    private static bool HasEmailBody(LatestEmail? email)
-    {
-        if (email is null || email.IsExcluded() || string.IsNullOrWhiteSpace(email.Body)) return false;
-        return !string.IsNullOrWhiteSpace(NotificationFormatter.CleanEmail(email.Body));
-    }
-
-    private static DashboardSummary BuildSummary(IReadOnlyList<TicketSnapshot> tickets)
-    {
-        var newCount = 0;
-        var assigned = 0;
-        var inProgress = 0;
-        var paused = 0;
-        var completed = 0;
-        var closed = 0;
-        var slaRisk = 0;
-        var slaViolated = 0;
-
-        foreach (var ticket in tickets)
-        {
-            switch (ticket.Status)
-            {
-                case TicketStatus.New: newCount++; break;
-                case TicketStatus.Assigned: assigned++; break;
-                case TicketStatus.InProgress: inProgress++; break;
-                case TicketStatus.Paused: paused++; break;
-                case TicketStatus.Completed: completed++; break;
-                case TicketStatus.Closed: closed++; break;
-            }
-
-            if (ticket.SlaType == 2) slaRisk++;
-            else if (ticket.SlaType == 3) slaViolated++;
-        }
-
-        return new DashboardSummary(tickets.Count, newCount, assigned, inProgress, paused, completed, closed,
-            slaRisk, slaViolated);
+        SummaryChanged?.Invoke(new DashboardSummary(
+            tickets.Count,
+            tickets.Count(x => x.Status == TicketStatus.New),
+            tickets.Count(x => x.Status == TicketStatus.Assigned),
+            tickets.Count(x => x.Status == TicketStatus.InProgress),
+            tickets.Count(x => x.Status == TicketStatus.Paused),
+            tickets.Count(x => x.Status == TicketStatus.Completed),
+            tickets.Count(x => x.Status == TicketStatus.Closed),
+            tickets.Count(x => x.SlaType == 2),
+            tickets.Count(x => x.SlaType == 3)));
+        await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
+        StatusChanged?.Invoke($"Đồng bộ {tickets.Count} ticket, đang theo dõi {_active.Count}");
     }
 }

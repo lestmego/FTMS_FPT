@@ -25,8 +25,6 @@ public partial class CompactWindow : Window
     private readonly string _telegramOffsetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion", "telegram.offset");
     private TicketMonitor? _monitor;
     private bool _monitorStarted;
-    private int _realtimeSyncScheduled;
-    private bool _loginRecoveryInProgress;
     private long _telegramUpdateOffset;
     private bool _checkingTelegram;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
@@ -36,14 +34,7 @@ public partial class CompactWindow : Window
     public CompactWindow()
     {
         InitializeComponent(); _settingsStore.Load(); Loaded += InitializeAsync;
-        Closed += (_, _) =>
-        {
-            _lifetime.Cancel();
-            _refreshTimer.Stop();
-            _telegramTimer.Stop();
-            _trayIcon?.Dispose();
-            _http.Dispose();
-        };
+        Closed += (_, _) => { _lifetime.Cancel(); _refreshTimer.Stop(); _trayIcon?.Dispose(); };
         Closing += OnWindowClosing;
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) HideToTray(); };
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
@@ -102,86 +93,45 @@ public partial class CompactWindow : Window
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
         var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: Path.Combine(root, "WebView2"));
         await FtmsWebView.EnsureCoreWebView2Async(environment);
-        await MonitorWebView.EnsureCoreWebView2Async(environment);
-        foreach (var browser in new[] { FtmsWebView, MonitorWebView })
+        FtmsWebView.CoreWebView2.AddWebResourceRequestedFilter(BlockedBotScript, CoreWebView2WebResourceContext.Script);
+        FtmsWebView.CoreWebView2.WebResourceRequested += (_, args) =>
         {
-            browser.CoreWebView2.AddWebResourceRequestedFilter(BlockedBotScript, CoreWebView2WebResourceContext.Script);
-            browser.CoreWebView2.WebResourceRequested += (_, args) =>
-            {
-                if (!args.Request.Uri.StartsWith(BlockedBotScript, StringComparison.OrdinalIgnoreCase)) return;
-                args.Response = environment.CreateWebResourceResponse(Stream.Null, 403, "Blocked", "Content-Type: application/javascript");
-            };
-            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(AutoLoginScript);
-            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BlockBotScript);
-        }
+            if (!args.Request.Uri.StartsWith(BlockedBotScript, StringComparison.OrdinalIgnoreCase)) return;
+            args.Response = environment.CreateWebResourceResponse(Stream.Null, 403, "Blocked", "Content-Type: application/javascript");
+        };
         FtmsWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ApiObserverScript);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BlockBotScript);
         var appSettings = new AppSettings { FtmsUrl = FtmsUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
         var databasePath = Path.Combine(root, "ftms.db");
-        var client = new WebViewFtmsClient(MonitorWebView, FtmsUrl);
+        var client = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
         var telegram = new TelegramOutboxSender(databasePath, () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http);
         _monitor = new TicketMonitor(client, new SqliteTicketStore(databasePath), telegram, new TicketChangeDetector(), appSettings);
-        _monitor.StatusChanged += message => Dispatcher.InvokeAsync(
-            () => MonitorText.Text = message, DispatcherPriority.Background);
-        _monitor.SummaryChanged += summary => Dispatcher.InvokeAsync(
-            () => UpdateDashboard(summary), DispatcherPriority.Background);
+        _monitor.StatusChanged += message => Dispatcher.Invoke(() => MonitorText.Text = message);
+        _monitor.SummaryChanged += summary => Dispatcher.Invoke(() => UpdateDashboard(summary));
         await _monitor.InitializeAsync(_lifetime.Token);
         ApplyRefreshSettings();
         _telegramTimer.Start();
-        MonitorWebView.Source = new Uri(FtmsUrl);
         FtmsWebView.Source = new Uri(FtmsUrl);
     }
 
-    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        string? message;
-        try { message = JsonSerializer.Deserialize<string>(e.WebMessageAsJson); }
-        catch (JsonException) { return; }
-        if (message == "ftms-api-updated") QueueRealtimeSync();
-    }
-
-    private void QueueRealtimeSync()
-    {
-        if (_monitor is null || Interlocked.Exchange(ref _realtimeSyncScheduled, 1) != 0) return;
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(500), _lifetime.Token).ConfigureAwait(false);
-                await _monitor.SyncNowAsync(_lifetime.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                _ = Dispatcher.InvokeAsync(() => MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}",
-                    DispatcherPriority.Background);
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _realtimeSyncScheduled, 0);
-            }
-        });
+            string? message; try { message = JsonSerializer.Deserialize<string>(e.WebMessageAsJson); } catch (JsonException) { return; }
+            if (message == "ftms-api-updated" && _monitor is not null) await _monitor.SyncNowAsync(_lifetime.Token);
+        }
+        catch (Exception ex) { MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}"; }
     }
 
     private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
     {
         var url = FtmsWebView.Source?.AbsoluteUri ?? "";
-        var connected = url.Contains("ftms.fpt.net/ihub/", StringComparison.OrdinalIgnoreCase);
-        var login = !connected && (url.Contains("login", StringComparison.OrdinalIgnoreCase) ||
-            url.Contains("adfs", StringComparison.OrdinalIgnoreCase) ||
-            url.Contains("/id/", StringComparison.OrdinalIgnoreCase));
-        if (login) _loginRecoveryInProgress = true;
+        var login = url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) || url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase);
         SessionText.Text = login ? "\u0110ang \u0111\u0103ng nh\u1eadp" : url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) ? "\u0110\u00e3 k\u1ebft n\u1ed1i" : "\u0110ang k\u1ebft n\u1ed1i";
         StatusDot.Fill = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(login ? "#D9A441" : "#4AA47B"));
-        if (!connected) return;
-        if (_loginRecoveryInProgress && !string.Equals(url, FtmsUrl, StringComparison.OrdinalIgnoreCase))
-        {
-            _loginRecoveryInProgress = false;
-            FtmsWebView.Source = new Uri(FtmsUrl);
-            return;
-        }
-        _loginRecoveryInProgress = false;
-        StartMonitorOnce();
+        if (!login && url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase)) StartMonitorOnce();
     }
 
     private void StartMonitorOnce()
@@ -189,8 +139,7 @@ public partial class CompactWindow : Window
         if (_monitorStarted || _monitor is null) return;
         _monitorStarted = true;
         MonitorText.Text = "B\u1eaft \u0111\u1ea7u theo d\u00f5i ticket";
-        _ = Task.Run(() => _monitor.RunAsync(
-            () => DateTimeOffset.Now - _lastUserActivity < TimeSpan.FromSeconds(8), _lifetime.Token));
+        _ = _monitor.RunAsync(() => DateTimeOffset.Now - _lastUserActivity < TimeSpan.FromSeconds(8), _lifetime.Token);
     }
 
     private void OpenSettings(object sender, RoutedEventArgs e) { if (new CompactSettingsWindow(_settingsStore) { Owner = this }.ShowDialog() == true) ApplyRefreshSettings(); }
@@ -316,7 +265,6 @@ public partial class CompactWindow : Window
                     search: code, isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                     alarmType: '0', isSortByDate: '' });
                   const findRequest = new XMLHttpRequest();
-                  findRequest.__ftmsCompanionInternal = true;
                   findRequest.open('POST', '/ihub/request/GetListRequestV12', false);
                   findRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                   findRequest.send(body.toString());
@@ -375,54 +323,20 @@ public partial class CompactWindow : Window
     private const string ApiObserverScript = """
         (() => { if (window.__ftmsCompanionInstalled) return; window.__ftmsCompanionInstalled = true;
           const watched=['GetListRequestV12','GetListCasesV12','GetListAlarm','GetListCasesRequest']; const hit=u=>watched.some(x=>String(u||'').includes(x));
-          let notifyTimer; const notify=()=>{clearTimeout(notifyTimer);notifyTimer=setTimeout(()=>window.chrome.webview.postMessage('ftms-api-updated'),500);};
-          const f=window.fetch; window.fetch=async(...a)=>{const r=await f(...a);if(hit(a[0]?.url||a[0]))notify();return r;};
+          const f=window.fetch; window.fetch=async(...a)=>{const r=await f(...a);if(hit(a[0]?.url||a[0])){try{window.__ftmsLastTicketResponse=await r.clone().text();}catch{}window.chrome.webview.postMessage('ftms-api-updated');}return r;};
           const o=XMLHttpRequest.prototype.open,s=XMLHttpRequest.prototype.send; XMLHttpRequest.prototype.open=function(m,u,...r){this.__u=u;return o.call(this,m,u,...r);};
-          XMLHttpRequest.prototype.send=function(...a){this.addEventListener('load',()=>{if(hit(this.__u)&&!this.__ftmsCompanionInternal)notify();});return s.apply(this,a);}; })();
-        """;
-
-    private const string AutoLoginScript = """
-        (() => {
-          if (window.__ftmsAutoLoginInstalled) return;
-          window.__ftmsAutoLoginInstalled = true;
-          const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const clickFptCorporation = () => {
-            const clickable = Array.from(document.querySelectorAll(
-              'button, a, [role="button"], input[type="button"], input[type="submit"], [tabindex]'));
-            let target = clickable.find(element => normalize(
-              element.innerText || element.textContent || element.value || element.getAttribute('aria-label'))
-              .includes('fpt corporation'));
-            if (!target) {
-              const label = Array.from(document.querySelectorAll('div, span, p, h1, h2, h3, strong'))
-                .find(element => normalize(element.textContent).includes('fpt corporation'));
-              target = label?.closest('button, a, [role="button"], [tabindex]') || label;
-            }
-            if (!target) return false;
-            target.click();
-            return true;
-          };
-          if (clickFptCorporation()) return;
-          let attempts = 0;
-          const timer = setInterval(() => {
-            attempts++;
-            if (clickFptCorporation() || attempts >= 120) clearInterval(timer);
-          }, 500);
-        })();
+          XMLHttpRequest.prototype.send=function(...a){this.addEventListener('load',()=>{if(hit(this.__u)){try{window.__ftmsLastTicketResponse=this.responseText;}catch{}window.chrome.webview.postMessage('ftms-api-updated');}});return s.apply(this,a);}; })();
         """;
 
     private const string BlockBotScript = """
         (() => {
           const blockedSource = 'https://ftmslite.fpt.vn/agent-ai/js/bot.js';
-          const blockedSelector = `script[src^="${blockedSource}"], [id*="agent-ai" i], [class*="agent-ai" i], [id*="chatbot" i], [class*="chatbot" i]`;
-          const removeBot = root => {
-            if (!(root instanceof Element)) return;
-            if (root.matches(blockedSelector)) { root.remove(); return; }
-            root.querySelectorAll(blockedSelector).forEach(element => element.remove());
+          const removeBot = () => {
+            document.querySelectorAll(`script[src^="${blockedSource}"]`).forEach(element => element.remove());
+            document.querySelectorAll('[id*="agent-ai" i], [class*="agent-ai" i], [id*="chatbot" i], [class*="chatbot" i]').forEach(element => element.remove());
           };
-          removeBot(document.documentElement);
-          new MutationObserver(records => {
-            for (const record of records) for (const node of record.addedNodes) removeBot(node);
-          }).observe(document.documentElement, { childList: true, subtree: true });
+          removeBot();
+          new MutationObserver(removeBot).observe(document.documentElement, { childList: true, subtree: true });
         })();
         """;
 

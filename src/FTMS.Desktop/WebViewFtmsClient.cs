@@ -7,15 +7,11 @@ namespace FTMS.Desktop;
 
 public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsClient
 {
-    private DateTimeOffset _lastLoginRecoveryAt = DateTimeOffset.MinValue;
-
-    public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
+    public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var url = await webView.Dispatcher.InvokeAsync(() => webView.Source?.AbsoluteUri ?? string.Empty);
-        return url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) &&
-            !url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) &&
-            !url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase);
+        var url = webView.Source?.AbsoluteUri ?? string.Empty;
+        return Task.FromResult(url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) &&
+            !url.Contains("/id/login", StringComparison.OrdinalIgnoreCase) && !url.Contains("/adfs/", StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken)
@@ -26,7 +22,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                 alarmType: '0', isSortByDate: '' });
               const xhr = new XMLHttpRequest();
-              xhr.__ftmsCompanionInternal = true;
               xhr.open('POST', '/ihub/request/GetListRequestV12', false);
               xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
               xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -76,10 +71,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               const dateOf = value => {
                 if (!value) return null;
                 if (typeof value === 'string') {
-                  const vi = value.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+                  const vi = value.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
                   if (vi) return `${vi[6]}-${vi[5].padStart(2,'0')}-${vi[4].padStart(2,'0')}T${vi[1].padStart(2,'0')}:${vi[2]}:${vi[3] || '00'}+07:00`;
                   const dotNet = value.match(/\/Date\((\d+)(?:[+-]\d+)?\)\//);
                   if (dotNet) return new Date(Number(dotNet[1])).toISOString();
+                  if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value))
+                    return value.replace(' ', 'T') + '+07:00';
                 }
                 const parsed = new Date(value);
                 return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
@@ -90,22 +87,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 return Number.isFinite(parsed) ? parsed : null;
               };
               const emailOf = row => {
-                const preferred = pick(row, 'customerEmail','CustomerEmail','cusEmail','CusEmail','customerMail','CustomerMail',
-                  'emailFrom','EmailFrom','fromEmail','FromEmail','fromAddress','FromAddress','senderEmail','SenderEmail',
-                  'sender','Sender','mailFrom','MailFrom','email','Email','contactEmail','ContactEmail');
                 const extract = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
-                const acceptable = value => !/ihub\.akabot2@fpt\.com/i.test(value);
-                const preferredEmail = extract(preferred).find(acceptable);
-                if (preferredEmail) return preferredEmail;
-                const ranked = Object.entries(row || {})
-                  .flatMap(([key, value]) => extract(value).map(email => ({ email, key })))
-                  .filter(item => acceptable(item.email))
-                  .sort((a, b) => {
-                    const rank = key => /(?:customer|cus|contact)/i.test(key) ? 0 :
-                      /(?:from|sender)/i.test(key) ? 1 : /email|mail/i.test(key) ? 2 : 3;
-                    return rank(a.key) - rank(b.key);
-                  });
-                return ranked[0]?.email || null;
+                const keys = ['mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster',
+                  'senderEmail','SenderEmail','sender','Sender','emailFrom','EmailFrom','fromEmail','FromEmail',
+                  'fromAddress','FromAddress','mailFrom','MailFrom'];
+                const ignored = ['fti.sd02@fpt.com','ihub.akabot2','ducvm19@fpt.com'];
+                if (keys.some(key => ignored.some(value => String(row?.[key] || '').toLowerCase().includes(value)))) return null;
+                const sender = keys.map(key => extract(row?.[key])[0]).find(Boolean) || null;
+                return sender;
               };
               let rows = unwrap(response);
               const pageSize = 1000;
@@ -114,7 +103,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   page: String(page), pageSize: String(pageSize), search: '', isMyTicket: '', isAkabot: '',
                   strStatus: '', strRegionID: '', linkDeptId: '', alarmType: '0', isSortByDate: '' });
                 const nextRequest = new XMLHttpRequest();
-                nextRequest.__ftmsCompanionInternal = true;
                 nextRequest.open('POST', '/ihub/request/GetListRequestV12', false);
                 nextRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                 nextRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -142,10 +130,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 slaType: numberOf(pick(row, 'typeSLA','TypeSLA','typeSla','slaType','SlaType','SLA_TYPE')),
                 latestEmail: (() => {
                   const sender = emailOf(row);
-                  const subject = pick(row, 'emailSubject','EmailSubject','subject','Subject','title','Title','REQUEST_TITLE');
-                  const content = pick(row, 'emailContent','EmailContent','contents','Contents','content','Content','description','Description','note','Note','catalogName','CatalogName');
-                  const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt','createDate','CreateDate'));
-                  if (!sender && !subject && !content) return null;
+                  const subject = pick(row, 'emailSubject','EmailSubject');
+                  const content = pick(row, 'emailContent','EmailContent');
+                  const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt'));
+                  if (!sender || !sentAt) return null;
                   const body = String(content || '').trim() === String(subject || '').trim() ? null : content;
                   return { id: String(pick(row, 'emailHistoryId','EmailHistoryId','emailId','EmailId','id','Id') || ''),
                     sentAt, from: sender, subject, body };
@@ -166,7 +154,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   take: '1000', skip: '0', page: '1', pageSize: '1000'
                 });
                 const historyRequest = new XMLHttpRequest();
-                historyRequest.__ftmsCompanionInternal = true;
                 historyRequest.open('GET', '/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), false);
                 historyRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
                 historyRequest.send();
@@ -206,7 +193,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               return JSON.stringify({ data: allTickets, count: allTickets.length });
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script, "tickets", TimeSpan.FromSeconds(45), cancellationToken);
+        var json = await ExecuteJsonStringAsync(script);
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         if (root.ValueKind == JsonValueKind.String)
@@ -249,7 +236,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const body = new URLSearchParams({ take: '500', skip: '0', page: '1', pageSize: '500',
                   search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                   alarmType: '0', isSortByDate: '' });
-                const xhr = new XMLHttpRequest(); xhr.__ftmsCompanionInternal = true; xhr.open('POST', '/ihub/request/GetListRequestV12', false);
+                const xhr = new XMLHttpRequest(); xhr.open('POST', '/ihub/request/GetListRequestV12', false);
                 xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                 xhr.send(body.toString());
                 if (xhr.status >= 200 && xhr.status < 300) result = JSON.parse(xhr.responseText);
@@ -298,7 +285,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 slaDeviationMinutes: x.slaDeviation ?? x.SlaDeviation, slaType: x.typeSLA ?? x.TypeSLA })));
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script, "tickets-legacy", TimeSpan.FromSeconds(30), cancellationToken);
+        var json = await ExecuteJsonStringAsync(script);
         return DeserializeTickets(json);
     }
 
@@ -311,24 +298,33 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const parseMailDate = value => {
                   if (!value) return null;
                   const normalized = String(value).replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1').trim();
-                  const parsed = new Date(normalized);
+                  const dotNet = normalized.match(/^\/Date\((\d+)(?:[+-]\d+)?\)\/$/);
+                  if (dotNet) return new Date(Number(dotNet[1]));
+                  const local = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/) ||
+                    normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+                  if (local) {
+                    const timeFirst = /^\d{1,2}:\d{2}/.test(normalized);
+                    const [day, month, year, hour, minute, second] = timeFirst
+                      ? [local[4], local[5], local[6], local[1], local[2], local[3] || '00']
+                      : [local[1], local[2], local[3], local[4], local[5], local[6] || '00'];
+                    const iso = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${hour.padStart(2, '0')}:${minute}:${second}+07:00`;
+                    const parsed = new Date(iso);
+                    return Number.isNaN(parsed.getTime()) ? null : parsed;
+                  }
+                  const isoWithoutZone = normalized.match(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/);
+                  const parsed = new Date(isoWithoutZone ? normalized.replace(' ', 'T') + '+07:00' : normalized);
                   return Number.isNaN(parsed.getTime()) ? null : parsed;
                 };
-                const quotedOriginal = (body, subject) => {
-                  const match = String(body || '').match(/(?:<hr\b[^>]*>|id=["'](?:divRplyFwdMsg|x_divRplyFwdMsg)["'][^>]*>)([\s\S]*)/i);
-                  if (!match) return null;
-                  const prepared = match[1].replace(/<br\s*\/?>/gi, '\n').replace(/<\/div>|<\/p>/gi, '\n');
-                  const text = new DOMParser().parseFromString(prepared, 'text/html').body.textContent
-                    .replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
-                  const fromMatch = text.match(/(?:Từ|Từ|From)\s*:\s*([^\s,;<>]+@[^\s,;<>]+)/i);
-                  const sentMatch = text.match(/(?:Đã gửi|Đã gửi|Sent)\s*:\s*([^\n]+)/i);
-                  const subjectIndex = text.search(/(?:Chủ đề|Subject)\s*:/i);
-                  let content = subjectIndex >= 0 ? text.slice(subjectIndex).replace(/^(?:Chủ đề|Subject)\s*:\s*/i, '').trim() : text;
-                  content = content.replace(/^(?:[^\n]*\n){0,2}(?=Dear|Chào|Kính gửi|Nhờ|Hi\b)/i, '').trim();
-                  if (!fromMatch || !content) return null;
-                  const parsedDate = sentMatch ? parseMailDate(sentMatch[1].trim()) : null;
-                  return { from: fromMatch[1], sentAt: parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null,
-                    subject: subject || null, body: content };
+                const emailAddress = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
+                const ignoredSender = (...values) => ['fti.sd02@fpt.com','ihub.akabot2','ducvm19@fpt.com']
+                  .some(ignored => values.some(value => String(value || '').toLowerCase().includes(ignored)));
+                const automatedReceipt = body => {
+                  const latest = String(body || '').split(/<hr\b|-----Original Message-----|From:\s*.{0,200}?\b(?:Sent|Date):/i)[0];
+                  const text = latest.replace(/<[^>]+>/g, ' ').normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                  return (text.includes('thong tin yeu cau ho tro') && text.includes('da duoc tiep nhan')) ||
+                    (text.includes('thong tin ho tro') && text.includes('ky thuat se kiem tra va phan hoi')) ||
+                    text.includes('itsm - phong ho tro khach hang') || text.includes('tong dai 1900 6973');
                 };
                 const unwrapRows = (value, depth = 0) => {
                   if (depth > 6 || value == null) return [];
@@ -347,8 +343,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (!fileId) return '';
                   const request = new XMLHttpRequest();
                   request.open('GET', '/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), false);
-                  try { request.send(); }
-                  catch { return ''; }
+                  request.send();
                   if (request.status < 200 || request.status >= 300) return '';
                   let content = request.responseText || '';
                   try {
@@ -358,37 +353,23 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   } catch {}
                   return String(content || '');
                 };
-                const readEmailDetail = emailId => {
-                  if (!emailId) return null;
-                  const request = new XMLHttpRequest();
-                  request.open('GET', '/ihub/email/index/' + encodeURIComponent(emailId), false);
-                  try { request.send(); }
-                  catch { return null; }
-                  if (request.status < 200 || request.status >= 300) return null;
-                  const doc = new DOMParser().parseFromString(request.responseText, 'text/html');
-                  const value = selector => {
-                    const element = doc.querySelector(selector);
-                    return String(element?.value || element?.getAttribute?.('value') || element?.textContent || '').trim() || null;
-                  };
-                  return { from: value('#sender') || value('[name="mail_poster"]'),
-                    subject: value('#subject_response') || value('[name="mail_subject"]'),
-                    sentAt: value('#sendDate') || value('#sentDate') || value('#createDate') ||
-                      value('[name="sendDate"]') || value('[name="sentDate"]') || value('[name="createDate"]') };
-                };
                 const historyRequest = new XMLHttpRequest();
                 historyRequest.open('POST', '/ihub/Email/GetEmailByCode', false);
-                historyRequest.setRequestHeader('Content-Type', 'application/json; charset=UTF-8');
+                // FTMS calls this endpoint through jQuery's default form encoding.
+                // A JSON body returns no email rows even though the ticket page shows them.
+                historyRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
                 historyRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                historyRequest.send(JSON.stringify({ code: {{code}} }));
+                historyRequest.send(new URLSearchParams({ code: {{code}} }).toString());
                 if (historyRequest.status >= 200 && historyRequest.status < 300) {
                   let history = unwrapRows(JSON.parse(historyRequest.responseText || '[]'));
                   if (history.length) {
                     const dateValue = value => {
                       const fallback = Object.entries(value || {}).find(([key, fieldValue]) =>
                         /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const raw = value?.createDate || value?.CreateDate || value?.createdDate || value?.CreatedDate ||
-                        value?.sendDate || value?.SendDate || value?.sentDate || value?.SentDate ||
-                        value?.emailDate || value?.EmailDate || value?.date || value?.Date || fallback;
+                      const raw = value?.sendDate || value?.SendDate || value?.sentDate || value?.SentDate ||
+                        value?.emailDate || value?.EmailDate ||
+                        value?.createDate || value?.CreateDate || value?.createdDate || value?.CreatedDate ||
+                        value?.date || value?.Date || fallback;
                       const parsed = parseMailDate(raw); return parsed?.getTime() || 0;
                     };
                     history.sort((a, b) => dateValue(b) - dateValue(a) || Number(b.id || b.Id || 0) - Number(a.id || a.Id || 0));
@@ -396,55 +377,36 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       const emailId = mail.id || mail.Id || mail.emailHistoryId || mail.EmailHistoryId;
                       const fileId = mail.fileId || mail.FileId || mail.FILEID || mail.FILE_ID || mail.emailFileId || mail.EmailFileId;
                       let body = mail.contents || mail.Contents || mail.content || mail.Content || mail.body || mail.Body || '';
-                      if (!body || String(body).trim() === String(mail.subject || mail.Subject || '').trim())
-                        body = readMailFile(fileId) || body;
-                      let sender = mail.customerEmail || mail.CustomerEmail || mail.cusEmail || mail.CusEmail ||
-                        mail.emailFrom || mail.EmailFrom || mail.fromEmail || mail.FromEmail ||
-                        mail.fromAddress || mail.FromAddress || mail.senderEmail || mail.SenderEmail ||
-                        mail.sender || mail.Sender || mail.email || mail.Email || mail.poster || mail.Poster || null;
+                      if (fileId) body = readMailFile(fileId) || body;
+                      if (String(body).trim() === String(mail.subject || mail.Subject || '').trim()) body = '';
+                      let sender = [mail.mailPoster, mail.MailPoster, mail.posterEmail, mail.PosterEmail,
+                        mail.poster, mail.Poster, mail.senderEmail, mail.SenderEmail, mail.sender, mail.Sender,
+                        mail.emailFrom, mail.EmailFrom, mail.fromEmail, mail.FromEmail,
+                        mail.fromAddress, mail.FromAddress].map(emailAddress).find(Boolean);
                       if (!sender) {
                         const candidates = Object.entries(mail).flatMap(([key, value]) => {
+                          if (!/(?:from|sender|poster)/i.test(key)) return [];
                           const emails = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
                           return emails.map(email => ({ key, email }));
-                        }).filter(item => !/ihub\.akabot2@fpt\.com/i.test(item.email));
-                        candidates.sort((a, b) => {
-                          const rank = key => /(?:customer|cus|contact)/i.test(key) ? 0 :
-                            /(?:from|sender|poster)/i.test(key) ? 1 : /email|mail/i.test(key) ? 2 : 3;
-                          return rank(a.key) - rank(b.key);
                         });
                         sender = candidates[0]?.email || null;
                       }
-                      const detail = readEmailDetail(emailId);
-                      sender = sender || detail?.from || null;
-                      const searchable = `${sender || ''} ${body || ''}`;
-                      if (/ihub\.akabot2@fpt\.com/i.test(searchable)) continue;
-                      const plainBody = new DOMParser().parseFromString(String(body), 'text/html').body.textContent
-                        .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
-                      const standardReceipt = plainBody.includes('thông tin yêu cầu hỗ trợ') &&
-                        plainBody.includes('đã được tiếp nhận') && plainBody.includes('chuyển đến bộ phận');
-                      const technicalReceipt = plainBody.includes('thông tin hỗ trợ') &&
-                        plainBody.includes('đã được tiếp nhận') && plainBody.includes('kỹ thuật sẽ kiểm tra và phản hồi');
-                      const assignmentReceipt = plainBody.includes('kỹ thuật fpt nhận thông tin ycht') &&
-                        plainBody.includes('phân công nhân sự xử lý theo rq');
-                      if (standardReceipt || technicalReceipt || assignmentReceipt) {
-                        const original = quotedOriginal(body, mail.subject || mail.Subject || null);
-                        if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from)) {
-                          return JSON.stringify({ id: String(mail.id || mail.Id || '') + ':quoted', ...original });
-                        }
-                        continue;
-                      }
+                      if (ignoredSender(sender, mail.poster, mail.Poster, mail.mailPoster, mail.MailPoster) ||
+                          automatedReceipt(body)) continue;
                       const fallbackDate = Object.entries(mail).find(([key, fieldValue]) =>
                         /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const rawDate = mail.createDate || mail.CreateDate || mail.createdDate || mail.CreatedDate ||
-                        mail.sendDate || mail.SendDate || mail.sentDate || mail.SentDate ||
-                        mail.emailDate || mail.EmailDate || mail.date || mail.Date || detail?.sentAt || fallbackDate || null;
-                      const quoted = (!sender || !rawDate) ? quotedOriginal(body, mail.subject || mail.Subject || detail?.subject || null) : null;
-                      sender = sender || quoted?.from || null;
+                      const rawDate = mail.sendDate || mail.SendDate || mail.sentDate || mail.SentDate ||
+                        mail.emailDate || mail.EmailDate ||
+                        mail.createDate || mail.CreateDate || mail.createdDate || mail.CreatedDate ||
+                        mail.date || mail.Date || fallbackDate || null;
                       const parsedDate = parseMailDate(rawDate);
                       return JSON.stringify({ id: String(emailId || ''),
-                        sentAt: parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : quoted?.sentAt || null,
-                        from: sender, subject: mail.subject || mail.Subject || detail?.subject || null, body });
+                        sentAt: parsedDate?.toISOString() || null,
+                        from: sender, subject: mail.subject || mail.Subject || null, body });
                     }
+                    // All email rows were deliberately excluded; the C88 fallback
+                    // must not reintroduce an automated sender.
+                    return JSON.stringify(null);
                   }
                 }
                 const form = new FormData(); form.append('id', 'C88'); form.append('body', JSON.stringify({ p_strCode: {{code}} }));
@@ -457,7 +419,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
                   const rawDate = normalized.lasttimeresponse || normalized.lastresponsetime || normalized.timeresponse ||
                     normalized.responsetime || normalized.senddate || normalized.sentat || normalized.createdate;
-                  const parsed = new Date(rawDate || 0).getTime();
+                  const parsed = parseMailDate(rawDate)?.getTime() || 0;
                   const rawId = normalized.maxeh || normalized.emailhistoryid || normalized.id || 0;
                   return { time: Number.isNaN(parsed) ? 0 : parsed, id: Number(rawId) || 0 };
                 };
@@ -478,64 +440,28 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (fileId) body = readMailFile(fileId);
                   const emailId = field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID');
                   const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
-                  let sentAt = rawSentAt;
-                  if (typeof rawSentAt === 'string') {
-                    const match = rawSentAt.match(/(\d{1,2})[:\/](\d{1,2})(?::(\d{1,2}))?\s*(?:-|\s)\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-                    if (match) sentAt = `${match[6]}-${match[5].padStart(2,'0')}-${match[4].padStart(2,'0')}T${match[1].padStart(2,'0')}:${match[2].padStart(2,'0')}:${(match[3] || '00').padStart(2,'0')}+07:00`;
-                    else { const parsed = new Date(rawSentAt); sentAt = Number.isNaN(parsed.getTime()) ? null : parsed.toISOString(); }
-                  }
-                  let sender = field('EMAIL_FROM', 'FROM_EMAIL', 'EMAILFROM', 'FROM_ADDRESS', 'FROMADDRESS',
-                    'SENDER_EMAIL', 'SENDER', 'CUSTOMER_EMAIL', 'CUSTOMEREMAIL', 'CUS_EMAIL', 'CUSEMAIL',
-                    'CONTACT_EMAIL', 'CONTACTEMAIL', 'POSTER_EMAIL', 'POSTER', 'FROM');
+                  const parsedSentAt = parseMailDate(rawSentAt);
+                  let sentAt = parsedSentAt?.toISOString() || null;
+                  let sender = ['MAIL_POSTER', 'POSTER_EMAIL', 'POSTER', 'SENDER_EMAIL', 'SENDER',
+                    'EMAIL_FROM', 'FROM_EMAIL', 'EMAILFROM', 'FROM_ADDRESS', 'FROMADDRESS', 'FROM']
+                    .map(name => emailAddress(field(name))).find(Boolean);
                   if (!sender) {
                     const candidates = Object.entries(row).flatMap(([key, value]) => {
+                      if (!/(?:from|sender|poster)/i.test(key)) return [];
                       const emails = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
                       return emails.map(email => ({ key, email }));
-                    }).filter(item => !/ihub\.akabot2@fpt\.com|fti\.support@fpt\.com/i.test(item.email));
-                    candidates.sort((a, b) => {
-                      const rank = key => /(?:customer|cus|contact)/i.test(key) ? 0 :
-                        /(?:from|sender|poster)/i.test(key) ? 1 : /email|mail/i.test(key) ? 2 : 3;
-                      return rank(a.key) - rank(b.key);
                     });
                     sender = candidates[0]?.email || null;
                   }
-                  if (!sender && body) {
-                    const latestPart = body.split(/<hr\b|id=["'](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)/i)[0];
-                    const emails = latestPart.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig);
-                    sender = emails?.at(-1) || null;
-                  }
-                  const detail = readEmailDetail(emailId);
-                  sender = sender || detail?.from || null;
-                  const plainBody = new DOMParser().parseFromString(String(body || ''), 'text/html').body.textContent
-                    .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
-                  const standardReceipt = plainBody.includes('thông tin yêu cầu hỗ trợ') &&
-                    plainBody.includes('đã được tiếp nhận') && plainBody.includes('chuyển đến bộ phận');
-                  const technicalReceipt = plainBody.includes('thông tin hỗ trợ') &&
-                    plainBody.includes('đã được tiếp nhận') && plainBody.includes('kỹ thuật sẽ kiểm tra và phản hồi');
-                  const assignmentReceipt = plainBody.includes('kỹ thuật fpt nhận thông tin ycht') &&
-                    plainBody.includes('phân công nhân sự xử lý theo rq');
-                  const isExcluded = String(sender || '').trim().toLowerCase() === 'ihub.akabot2@fpt.com' ||
-                    /ihub\.akabot2@fpt\.com/i.test(body || '') || standardReceipt || technicalReceipt || assignmentReceipt;
-                  if (isExcluded) {
-                    const original = quotedOriginal(body, field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE'));
-                    if (original && !/ihub\.akabot2@fpt\.com/i.test(original.from)) {
-                      return JSON.stringify({ id: String(field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID') || fileId || '') + ':quoted', ...original });
-                    }
-                    continue;
-                  }
-                  const quoted = (!sender || !sentAt) ? quotedOriginal(body, field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || detail?.subject || null) : null;
-                  sender = sender || quoted?.from || null;
-                  sentAt = sentAt || detail?.sentAt || quoted?.sentAt || null;
+                  if (ignoredSender(sender, field('MAIL_POSTER','POSTER','SENDER','FROM')) || automatedReceipt(body)) continue;
                   return JSON.stringify({ id: String(emailId || fileId || ''), sentAt,
-                    from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || detail?.subject || null, body });
+                    from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
                 }
                 return JSON.stringify(null);
-              } catch {
-                return JSON.stringify(null);
-              }
+              } catch { return JSON.stringify(null); }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script, $"email:{ticketCode}", TimeSpan.FromSeconds(20), cancellationToken);
+        var json = await ExecuteJsonStringAsync(script);
         return DeserializeLatestEmail(json);
     }
 
@@ -548,6 +474,52 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var script = $$"""
             (() => {
               try {
+                // The ticket page loads its timeline asynchronously from this API.
+                // The HTML returned by /edit/{code} does not contain the rendered entries.
+                const timelineRequest = new XMLHttpRequest();
+                timelineRequest.open('GET', '/ihub/{{route}}/GetTimeLineByCode?code=' + encodeURIComponent({{code}}), false);
+                timelineRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+                timelineRequest.send();
+                if (timelineRequest.status >= 200 && timelineRequest.status < 300) {
+                  const unwrap = (value, depth = 0) => {
+                    if (depth > 6 || value == null) return [];
+                    if (Array.isArray(value)) return value;
+                    if (typeof value === 'string') {
+                      try { return unwrap(JSON.parse(value), depth + 1); } catch { return []; }
+                    }
+                    if (typeof value !== 'object') return [];
+                    for (const key of ['data','Data','result','Result','rows','Rows']) {
+                      const rows = unwrap(value[key], depth + 1);
+                      if (rows.length) return rows;
+                    }
+                    return [];
+                  };
+                  const parseDate = value => {
+                    if (!value) return null;
+                    const raw = String(value).trim();
+                    const dotNet = raw.match(/^\/Date\((\d+)(?:[+-]\d+)?\)\/$/);
+                    if (dotNet) return new Date(Number(dotNet[1])).toISOString();
+                    const local = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw);
+                    const parsed = new Date(local ? raw.replace(' ', 'T') + '+07:00' : raw);
+                    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+                  };
+                  const rows = unwrap(JSON.parse(timelineRequest.responseText || '[]'))
+                    .map(row => ({ status: Number(row.status ?? row.Status ?? row.statusId ?? row.StatusId),
+                      occurredAt: parseDate(row.createDate ?? row.CreateDate ?? row.date ?? row.Date),
+                      // The FTMS timeline labels "Thực hiện" with the assigned staff.
+                      // "creator" can be the mail service when an email reopens a ticket.
+                      actor: row.staffName ?? row.StaffName ?? row.agentName ?? row.AgentName ??
+                        row.creator ?? row.Creator ?? null,
+                      id: Number(row.id ?? row.Id ?? 0) }))
+                    .filter(row => row.occurredAt && Number.isFinite(row.status))
+                    .sort((a, b) => new Date(a.occurredAt) - new Date(b.occurredAt) || a.id - b.id);
+                  const changes = rows.filter((row, index) => row.status === {{expectedStatus}} &&
+                    (index === 0 || rows[index - 1].status !== row.status));
+                  if (changes.length) {
+                    const latest = changes[changes.length - 1];
+                    return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor });
+                  }
+                }
                 const xhr = new XMLHttpRequest();
                 xhr.open('GET', '/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), false);
                 xhr.send();
@@ -568,11 +540,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const statusText = normalize(heading.textContent);
                   return { status: statusMap[statusText.toLocaleLowerCase('vi-VN')], occurredAt, actor };
                 }).filter(x => x.occurredAt && x.status === {{expectedStatus}});
-                return JSON.stringify(entries.at(-1) || null);
+                entries.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+                return JSON.stringify(entries[0] || null);
               } catch { return JSON.stringify(null); }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script, $"status-history:{ticketCode}", TimeSpan.FromSeconds(20), cancellationToken);
+        var json = await ExecuteJsonStringAsync(script);
         if (string.IsNullOrWhiteSpace(json) || json == "null") return null;
         try
         {
@@ -592,40 +565,18 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         catch (JsonException) { return null; }
     }
 
-    public async Task BeginLoginRecoveryAsync(CancellationToken cancellationToken)
+    public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (DateTimeOffset.Now - _lastLoginRecoveryAt < TimeSpan.FromSeconds(10)) return;
-        _lastLoginRecoveryAt = DateTimeOffset.Now;
-        await webView.Dispatcher.InvokeAsync(() =>
-        {
-            var currentUrl = webView.Source?.AbsoluteUri ?? string.Empty;
-            var onLoginPage = currentUrl.Contains("login", StringComparison.OrdinalIgnoreCase) ||
-                currentUrl.Contains("adfs", StringComparison.OrdinalIgnoreCase) ||
-                currentUrl.Contains("/id/", StringComparison.OrdinalIgnoreCase);
-            if (!onLoginPage) webView.Source = new Uri(ftmsUrl);
-        });
+        webView.Dispatcher.Invoke(() => webView.Source = new Uri(ftmsUrl));
+        return Task.CompletedTask;
     }
 
-    private async Task<string> ExecuteJsonStringAsync(string script, string operationName, TimeSpan timeout,
-        CancellationToken cancellationToken)
+    private async Task<string> ExecuteJsonStringAsync(string script)
     {
-        try
-        {
-            var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(script));
-            var raw = await operation.WaitAsync(timeout, cancellationToken);
-            try { return JsonSerializer.Deserialize<string>(raw) ?? "null"; }
-            catch (JsonException) { return raw; }
-        }
-        catch (TimeoutException)
-        {
-            _ = webView.Dispatcher.InvokeAsync(() => webView.Reload());
-            throw new TimeoutException($"FTMS API timeout: {operationName}");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
+        var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(script));
+        var raw = await operation;
+        try { return JsonSerializer.Deserialize<string>(raw) ?? "null"; }
+        catch (JsonException) { return raw; }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
