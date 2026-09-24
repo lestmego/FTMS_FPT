@@ -18,7 +18,12 @@ public sealed class TicketChangeDetector
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal)) continue;
                 var initialEmail = await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken);
                 var email = SelectEmail(initialEmail, snapshot.LatestEmail);
-                events.Add(Create(snapshot with { LatestEmail = email }, TicketEventType.Created, null, "Phát hiện ticket mới", email));
+                var enriched = snapshot with { LatestEmail = email };
+                events.Add(Create(enriched, TicketEventType.Created, null, "Phát hiện ticket mới", email));
+                var initialSlaReason = SlaReason(snapshot, settings.SlaThresholds);
+                if (initialSlaReason is not null)
+                    events.Add(Create(enriched, TicketEventType.SlaThresholdReached, null, initialSlaReason, email,
+                        discriminator: snapshot.SlaType == 3 ? "overdue" : $"risk-{snapshot.SlaDeviationMinutes}"));
                 continue;
             }
 
@@ -103,16 +108,20 @@ public sealed class TicketChangeDetector
                 }
             }
 
-            foreach (var threshold in settings.SlaThresholds)
+            var crossedThreshold = snapshot.SlaType == 2 && snapshot.SlaDeviationMinutes is > 0
+                ? settings.SlaThresholds.Where(threshold => snapshot.SlaDeviationMinutes <= threshold &&
+                    (old.SlaType != 2 || old.SlaDeviationMinutes is null || old.SlaDeviationMinutes > threshold))
+                    .OrderBy(threshold => threshold)
+                    .FirstOrDefault()
+                : 0;
+            if (crossedThreshold > 0)
             {
-                if (snapshot.SlaType == 2 && old.SlaDeviationMinutes > threshold &&
-                    snapshot.SlaDeviationMinutes is > 0 && snapshot.SlaDeviationMinutes <= threshold)
-                {
-                    var email = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken),
-                        snapshot.LatestEmail, old.LatestEmail);
-                    var enriched = snapshot with { LatestEmail = email };
-                    events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, $"Còn {threshold} phút đến hạn SLA", enriched.LatestEmail, threshold.ToString()));
-                }
+                var email = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken),
+                    snapshot.LatestEmail, old.LatestEmail);
+                var enriched = snapshot with { LatestEmail = email };
+                events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status,
+                    $"Sắp vi phạm SLA: còn {snapshot.SlaDeviationMinutes} phút", enriched.LatestEmail,
+                    discriminator: $"risk-{crossedThreshold}"));
             }
 
             if (snapshot.SlaType == 3 && old.SlaType != 3 &&
@@ -121,7 +130,7 @@ public sealed class TicketChangeDetector
                 var email = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken),
                     snapshot.LatestEmail, old.LatestEmail);
                 var enriched = snapshot with { LatestEmail = email };
-                events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, "Ticket đã quá hạn SLA",
+                events.Add(Create(enriched, TicketEventType.SlaThresholdReached, old.Status, "Đã vi phạm SLA",
                     enriched.LatestEmail, "overdue"));
             }
 
@@ -138,6 +147,16 @@ public sealed class TicketChangeDetector
 
         }
         return events;
+    }
+
+    private static string? SlaReason(TicketSnapshot snapshot, IReadOnlyCollection<int> thresholds)
+    {
+        if (snapshot.SlaType == 3) return "Đã vi phạm SLA";
+        if (snapshot.SlaType != 2 || snapshot.SlaDeviationMinutes is not > 0) return null;
+        var highestThreshold = thresholds.Count == 0 ? 0 : thresholds.Max();
+        return snapshot.SlaDeviationMinutes <= highestThreshold
+            ? $"Sắp vi phạm SLA: còn {snapshot.SlaDeviationMinutes} phút"
+            : null;
     }
 
     private static bool IsNewEmail(LatestEmail? old, LatestEmail? current)

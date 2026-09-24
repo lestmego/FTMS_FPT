@@ -18,7 +18,8 @@ public static partial class NotificationFormatter
             TicketEventType.EmailReceived => "📧 <b>🔴 EMAIL MỚI CỦA TICKET</b>",
             TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
             TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
-            TicketEventType.SlaThresholdReached => "⏰ <b>🔴 CẢNH BÁO SLA</b>",
+            TicketEventType.SlaThresholdReached when ticket.SlaType == 3 => "🚨 <b>🔴 ĐÃ VI PHẠM SLA</b>",
+            TicketEventType.SlaThresholdReached => "⏰ <b>🟠 SẮP VI PHẠM SLA</b>",
             TicketEventType.Terminal => ticket.Status switch
             {
                 TicketStatus.Closed => "🔒 <b>⚫ TICKET ĐÃ ĐÓNG</b>",
@@ -66,7 +67,13 @@ public static partial class NotificationFormatter
                 text.AppendLine($"🏢 <b>Phòng ban:</b> {Escape(NormalizeEmpty(item.PreviousDepartmentName, "Chưa có"))} ➔ {Escape(NormalizeEmpty(ticket.DepartmentName, "Chưa có"))}");
         }
         if (item.EventType == TicketEventType.SlaThresholdReached)
+        {
             text.AppendLine($"⚠️ <b>SLA:</b> {Escape(item.Reason)}");
+            if (ticket.SlaDeviationMinutes is not null)
+                text.AppendLine(ticket.SlaType == 3
+                    ? $"⛔ <b>Số phút vi phạm:</b> {Math.Abs(ticket.SlaDeviationMinutes.Value)} phút"
+                    : $"⏳ <b>Thời gian còn lại:</b> {ticket.SlaDeviationMinutes.Value} phút");
+        }
         var email = item.LatestEmail is { } eventEmail && !eventEmail.IsExcluded()
             ? eventEmail : ticket.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded()
                 ? snapshotEmail : null;
