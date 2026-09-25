@@ -7,7 +7,7 @@ using Microsoft.Win32;
 namespace FTMS.Desktop;
 
 public sealed record DesktopSettings(string TelegramToken = "", string TelegramChatId = "", bool StartWithWindows = false,
-    bool AutoRefreshEnabled = true, int AutoRefreshSeconds = 30);
+    bool AutoRefreshEnabled = true, int AutoRefreshSeconds = 30, string TelegramProxyUrl = "");
 
 public sealed class SettingsStore
 {
@@ -20,7 +20,8 @@ public sealed class SettingsStore
         var persisted = JsonSerializer.Deserialize<PersistedSettings>(File.ReadAllText(_path));
         if (persisted is null) return;
         Current = new DesktopSettings(Unprotect(persisted.ProtectedTelegramToken), persisted.TelegramChatId ?? "", persisted.StartWithWindows,
-            persisted.AutoRefreshEnabled, persisted.AutoRefreshSeconds <= 0 ? 30 : persisted.AutoRefreshSeconds);
+            persisted.AutoRefreshEnabled, persisted.AutoRefreshSeconds <= 0 ? 30 : persisted.AutoRefreshSeconds,
+            persisted.TelegramProxyUrl ?? "");
         ApplyStartup(Current.StartWithWindows);
     }
 
@@ -29,7 +30,7 @@ public sealed class SettingsStore
         Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
         Current = settings;
         var persisted = new PersistedSettings(Protect(settings.TelegramToken), settings.TelegramChatId, settings.StartWithWindows,
-            settings.AutoRefreshEnabled, settings.AutoRefreshSeconds);
+            settings.AutoRefreshEnabled, settings.AutoRefreshSeconds, settings.TelegramProxyUrl);
         File.WriteAllText(_path, JsonSerializer.Serialize(persisted, new JsonSerializerOptions { WriteIndented = true }));
         ApplyStartup(settings.StartWithWindows);
     }
@@ -55,5 +56,5 @@ public sealed class SettingsStore
     }
 
     private sealed record PersistedSettings(string ProtectedTelegramToken, string? TelegramChatId, bool StartWithWindows,
-        bool AutoRefreshEnabled = true, int AutoRefreshSeconds = 30);
+        bool AutoRefreshEnabled = true, int AutoRefreshSeconds = 30, string? TelegramProxyUrl = null);
 }

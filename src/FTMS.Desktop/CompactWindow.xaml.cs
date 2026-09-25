@@ -21,7 +21,7 @@ public partial class CompactWindow : Window
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _refreshTimer = new();
     private readonly DispatcherTimer _telegramTimer = new() { Interval = TimeSpan.FromSeconds(4) };
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http;
     private readonly string _telegramOffsetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion", "telegram.offset");
     private TicketMonitor? _monitor;
     private WebViewFtmsClient? _ftmsClient;
@@ -36,8 +36,8 @@ public partial class CompactWindow : Window
 
     public CompactWindow()
     {
-        InitializeComponent(); _settingsStore.Load(); Loaded += InitializeAsync;
-        Closed += (_, _) => { _lifetime.Cancel(); _refreshTimer.Stop(); _trayIcon?.Dispose(); };
+        InitializeComponent(); _settingsStore.Load(); _http = TelegramHttpClientFactory.Create(() => _settingsStore.Current); Loaded += InitializeAsync;
+        Closed += (_, _) => { _lifetime.Cancel(); _refreshTimer.Stop(); _telegramTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
         Closing += OnWindowClosing;
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) HideToTray(); };
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();

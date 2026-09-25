@@ -15,6 +15,7 @@ public partial class ShellWindow : Window
 {
     private const string FtmsUrl = "https://ftms.fpt.net/ihub/list?tab=2";
     private readonly SettingsStore _settingsStore = new();
+    private readonly HttpClient _telegramHttp;
     private CancellationTokenSource _lifetime = new();
     private TicketMonitor? _monitor;
     private bool _monitorStarted;
@@ -23,7 +24,8 @@ public partial class ShellWindow : Window
 
     public ShellWindow()
     {
-        InitializeComponent(); _settingsStore.Load(); Loaded += InitializeAsync; Closed += (_, _) => { _lifetime.Cancel(); _refreshTimer.Stop(); };
+        InitializeComponent(); _settingsStore.Load(); _telegramHttp = TelegramHttpClientFactory.Create(() => _settingsStore.Current);
+        Loaded += InitializeAsync; Closed += (_, _) => { _lifetime.Cancel(); _refreshTimer.Stop(); _telegramHttp.Dispose(); };
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
     }
 
@@ -40,7 +42,7 @@ public partial class ShellWindow : Window
         var databasePath = Path.Combine(root, "ftms.db");
         var client = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
         var telegram = new TelegramOutboxSender(databasePath,
-            () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), new HttpClient());
+            () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _telegramHttp);
         _monitor = new TicketMonitor(client, new SqliteTicketStore(databasePath), telegram, new TicketChangeDetector(), settings);
         _monitor.StatusChanged += message => Dispatcher.Invoke(() => MonitorText.Text = message);
         _monitor.SummaryChanged += summary => Dispatcher.Invoke(() => UpdateDashboard(summary));

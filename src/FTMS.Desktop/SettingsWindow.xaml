@@ -1,11 +1,14 @@
 <Window x:Class="FTMS.Desktop.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Cài đặt" Width="500" Height="650" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" Background="#F5F5F7" FontFamily="Segoe UI Variable Display">
+        Title="Cài đặt" Width="500" Height="720" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" Background="#F5F5F7" FontFamily="Segoe UI Variable Display">
     <Grid Margin="30"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel><TextBlock Text="Cài đặt thông báo" FontSize="28" FontWeight="SemiBold" Foreground="#172522"/>
             <TextBlock Text="Telegram và khởi động cùng Windows" Margin="0,7,0,0" Foreground="#6B7773"/></StackPanel>
         <StackPanel Grid.Row="1" Margin="0,32,0,0">
             <TextBlock Text="Telegram bot token" FontWeight="SemiBold" Foreground="#263B35"/><PasswordBox x:Name="TokenBox" Margin="0,8,0,22" Padding="13" FontSize="14"/>
             <TextBlock Text="Telegram chat ID" FontWeight="SemiBold" Foreground="#263B35"/><TextBox x:Name="ChatIdBox" Margin="0,8,0,22" Padding="13" FontSize="14"/>
+            <TextBlock Text="HTTP proxy cho Telegram (http://host:port)" FontWeight="SemiBold" Foreground="#263B35"/>
+            <TextBox x:Name="ProxyUrlBox" Margin="0,8,0,8" Padding="13" FontSize="14"/>
+            <TextBlock Text="Để trống nếu mạng không cần proxy." Foreground="#66706D" Margin="0,0,0,16"/>
             <Separator Margin="0,2,0,20" Background="#E1E1E4"/>
             <TextBlock Text="Tự động làm mới danh sách FTMS" FontWeight="SemiBold" Foreground="#263B35"/>
             <CheckBox x:Name="AutoRefreshCheck" Content="Bật tự động làm mới" Margin="0,10,0,14" FontSize="14" Foreground="#263B35"/>

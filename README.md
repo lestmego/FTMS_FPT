@@ -4,7 +4,7 @@
 
 ## Cài đặt
 
-Tải và chạy `dist/FTMS-Companion-Setup-1.0.0.exe` trên Windows 64-bit. Bộ cài chứa .NET 8 và tự cài Microsoft Edge WebView2 Runtime khi cần.
+Tải và chạy `dist/FTMS-Companion-Setup-1.0.3.exe` trên Windows 64-bit. Bộ cài chứa .NET 8 và tự cài Microsoft Edge WebView2 Runtime khi cần.
 
 ## Xây dựng
 
@@ -17,6 +17,12 @@ Bộ cài được tạo trong thư mục `dist`.
 ## Dữ liệu cục bộ
 
 Token Telegram, cấu hình người dùng, SQLite và phiên WebView2 được lưu trong `%LOCALAPPDATA%\FTMS.Companion`; các dữ liệu này không nằm trong repository.
+
+## Telegram qua proxy công ty
+
+Trong **Cài đặt**, nhập **HTTP proxy cho Telegram** theo dạng `http://host:port`, rồi bấm **Gửi thử**. Nếu mạng không cần proxy, để trống ô này. Proxy chỉ áp dụng cho các yêu cầu Telegram của ứng dụng; trang FTMS trong WebView2 vẫn dùng cấu hình mạng của Windows.
+
+Nếu máy cũng chạy Telegram Checklist Reporter, có thể lấy `TELEGRAM_PROXY_HOST` và `TELEGRAM_PROXY_PORT` từ `D:\Notification Telegram\config.env` và ghép thành `http://host:port`. Không nhập bot token hoặc API hash của ứng dụng đó vào ô proxy. Sau khi lưu, các thông báo đang chờ trong SQLite sẽ được thử gửi lại khi FTMS còn đăng nhập và đồng bộ thành công.
 
 ## Lọc thông báo
 

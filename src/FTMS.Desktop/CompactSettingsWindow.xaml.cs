@@ -16,6 +16,7 @@ public partial class CompactSettingsWindow : Window
         _store = store;
         TokenBox.Password = store.Current.TelegramToken;
         ChatIdBox.Text = store.Current.TelegramChatId;
+        ProxyUrlBox.Text = store.Current.TelegramProxyUrl;
         StartupCheck.IsChecked = store.Current.StartWithWindows;
         AutoRefreshCheck.IsChecked = store.Current.AutoRefreshEnabled;
         RefreshSecondsBox.Text = store.Current.AutoRefreshSeconds.ToString();
@@ -23,9 +24,15 @@ public partial class CompactSettingsWindow : Window
 
     private void Save(object sender, RoutedEventArgs e)
     {
+        var proxyUrl = ProxyUrlBox.Text.Trim();
+        if (!TelegramHttpClientFactory.TryParseProxy(proxyUrl, out _))
+        {
+            ShowTestStatus("HTTP proxy phải có dạng http://host:port (không chứa tài khoản hoặc đường dẫn).", false);
+            return;
+        }
         var seconds = int.TryParse(RefreshSecondsBox.Text, out var value) ? Math.Clamp(value, 5, 3600) : 30;
         _store.Save(new DesktopSettings(TokenBox.Password.Trim(), ChatIdBox.Text.Trim(), StartupCheck.IsChecked == true,
-            AutoRefreshCheck.IsChecked == true, seconds));
+            AutoRefreshCheck.IsChecked == true, seconds, proxyUrl));
         DialogResult = true;
     }
 
@@ -33,6 +40,12 @@ public partial class CompactSettingsWindow : Window
     {
         var token = TokenBox.Password.Trim();
         var chatId = ChatIdBox.Text.Trim();
+        var proxyUrl = ProxyUrlBox.Text.Trim();
+        if (!TelegramHttpClientFactory.TryParseProxy(proxyUrl, out _))
+        {
+            ShowTestStatus("HTTP proxy phải có dạng http://host:port (không chứa tài khoản hoặc đường dẫn).", false);
+            return;
+        }
         if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(chatId))
         {
             ShowTestStatus("Vui l\u00f2ng nh\u1eadp \u0111\u1ea7y \u0111\u1ee7 bot token v\u00e0 chat ID.", false);
@@ -43,7 +56,8 @@ public partial class CompactSettingsWindow : Window
         ShowTestStatus("\u0110ang g\u1eedi tin nh\u1eafn th\u1eed...", true);
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            using var http = TelegramHttpClientFactory.Create(() => new DesktopSettings(TelegramProxyUrl: proxyUrl));
+            http.Timeout = TimeSpan.FromSeconds(15);
             var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/sendMessage", new
             {
                 chat_id = chatId,
