@@ -22,12 +22,12 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         {
             try
             {
-                if (!await client.IsAuthenticatedAsync(cancellationToken))
+                if (!userIsActive() && !await client.IsAuthenticatedAsync(cancellationToken))
                 {
                     SummaryChanged?.Invoke(UnavailableSummary());
                     await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
-                else
+                else if (!userIsActive())
                 {
                     await SyncNowAsync(cancellationToken);
                 }
@@ -36,7 +36,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             catch (UnauthorizedAccessException)
             {
                 SummaryChanged?.Invoke(UnavailableSummary());
-                await client.BeginLoginRecoveryAsync(cancellationToken);
+                if (!userIsActive()) await client.BeginLoginRecoveryAsync(cancellationToken);
             }
             catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
             try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken); }

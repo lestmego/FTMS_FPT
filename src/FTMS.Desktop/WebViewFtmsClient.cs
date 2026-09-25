@@ -2,7 +2,7 @@ using System.Text.Json;
 using FTMS.Application;
 using FTMS.Domain;
 using Microsoft.Web.WebView2.Wpf;
-
+using Microsoft.Web.WebView2.Core;
 namespace FTMS.Desktop;
 
 public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsClient
@@ -51,22 +51,25 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken)
     {
         const string script = """
-            (() => {
+            (async () => {
               const body = new URLSearchParams({ take: '1000', skip: '0', page: '1', pageSize: '1000',
                 search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
                 alarmType: '0', isSortByDate: '' });
-              const xhr = new XMLHttpRequest();
-              xhr.open('POST', '/ihub/request/GetListRequestV12', false);
-              xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-              xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-              try { xhr.send(body.toString()); }
-              catch (error) { return JSON.stringify({ error: String(error) }); }
-              if (xhr.status < 200 || xhr.status >= 300)
-                return JSON.stringify({ error: `FTMS API HTTP ${xhr.status}` });
-
               let response;
-              try { response = JSON.parse(xhr.responseText); }
-              catch { return JSON.stringify({ error: 'FTMS API trả về dữ liệu không hợp lệ' }); }
+              try {
+                const request = await fetch('/ihub/request/GetListRequestV12', {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'X-Requested-With': 'XMLHttpRequest' },
+                  body: body.toString()
+                });
+                if (/\/id\/login|\/adfs\//i.test(new URL(request.url).pathname))
+                  return JSON.stringify({ error: 'FTMS API HTTP 401' });
+
+                if (!request.ok) return JSON.stringify({ error: `FTMS API HTTP ${request.status}` });
+                response = await request.json();
+              } catch (error) { return JSON.stringify({ error: String(error) }); }
               const unwrap = (value, depth = 0) => {
                 if (depth > 8 || value == null) return [];
                 if (Array.isArray(value)) return value;
@@ -136,18 +139,20 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const nextBody = new URLSearchParams({ take: String(pageSize), skip: String((page - 1) * pageSize),
                   page: String(page), pageSize: String(pageSize), search: '', isMyTicket: '', isAkabot: '',
                   strStatus: '', strRegionID: '', linkDeptId: '', alarmType: '0', isSortByDate: '' });
-                const nextRequest = new XMLHttpRequest();
-                nextRequest.open('POST', '/ihub/request/GetListRequestV12', false);
-                nextRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-                nextRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                try { nextRequest.send(nextBody.toString()); } catch { break; }
-                if (nextRequest.status < 200 || nextRequest.status >= 300) break;
-                let nextResponse;
-                try { nextResponse = JSON.parse(nextRequest.responseText); } catch { break; }
-                const nextRows = unwrap(nextResponse);
-                if (!nextRows.length) break;
-                rows.push(...nextRows);
-                if (nextRows.length < pageSize) break;
+                try {
+                  const nextResponse = await fetch('/ihub/request/GetListRequestV12', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                      'X-Requested-With': 'XMLHttpRequest' },
+                    body: nextBody.toString()
+                  });
+                  if (!nextResponse.ok) break;
+                  const nextRows = unwrap(await nextResponse.json());
+                  if (!nextRows.length) break;
+                  rows.push(...nextRows);
+                  if (nextRows.length < pageSize) break;
+                } catch { break; }
               }
               const tickets = rows.map(row => ({
                 code: String(pick(row, 'code','Code','requestCode','RequestCode','REQUEST_CODE','REQUESTCODE','requestNo','RequestNo') || '').trim(),
@@ -187,12 +192,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   fromDate: formatDate(yesterday), toDate: formatDate(today), typeSearch: '0',
                   take: '1000', skip: '0', page: '1', pageSize: '1000'
                 });
-                const historyRequest = new XMLHttpRequest();
-                historyRequest.open('GET', '/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), false);
-                historyRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                historyRequest.send();
-                if (historyRequest.status >= 200 && historyRequest.status < 300) {
-                  const historyRows = unwrap(JSON.parse(historyRequest.responseText));
+                const historyResponse = await fetch('/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), {
+                  credentials: 'same-origin',
+                  headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                if (historyResponse.ok) {
+                  const historyRows = unwrap(await historyResponse.json());
                   for (const row of historyRows) {
                     const code = String(pick(row, 'code','Code','requestCode','RequestCode') || '').trim();
                     if (!code) continue;
@@ -227,7 +232,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               return JSON.stringify({ data: allTickets, count: allTickets.length });
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         if (root.ValueKind == JsonValueKind.String)
@@ -327,7 +332,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     {
         var code = JsonSerializer.Serialize(ticketCode);
         var script = $$"""
-            (() => {
+            (async () => {
               try {
                 const parseMailDate = value => {
                   if (!value) return null;
@@ -373,29 +378,32 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   }
                   return [];
                 };
-                const readMailFile = fileId => {
+                const readMailFile = async fileId => {
                   if (!fileId) return '';
-                  const request = new XMLHttpRequest();
-                  request.open('GET', '/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), false);
-                  request.send();
-                  if (request.status < 200 || request.status >= 300) return '';
-                  let content = request.responseText || '';
                   try {
-                    const parsed = JSON.parse(content);
-                    content = typeof parsed === 'string' ? parsed :
-                      parsed?.data || parsed?.Data || parsed?.content || parsed?.Content || parsed?.body || parsed?.Body || content;
-                  } catch {}
-                  return String(content || '');
+                    const response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
+                      credentials: 'same-origin'
+                    });
+                    if (!response.ok) return '';
+                    let content = await response.text();
+                    try {
+                      const parsed = JSON.parse(content);
+                      content = typeof parsed === 'string' ? parsed :
+                        parsed?.data || parsed?.Data || parsed?.content || parsed?.Content || parsed?.body || parsed?.Body || content;
+                    } catch {}
+                    return String(content || '');
+                  } catch { return ''; }
                 };
-                const historyRequest = new XMLHttpRequest();
-                historyRequest.open('POST', '/ihub/Email/GetEmailByCode', false);
-                // FTMS calls this endpoint through jQuery's default form encoding.
-                // A JSON body returns no email rows even though the ticket page shows them.
-                historyRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-                historyRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                historyRequest.send(new URLSearchParams({ code: {{code}} }).toString());
-                if (historyRequest.status >= 200 && historyRequest.status < 300) {
-                  let history = unwrapRows(JSON.parse(historyRequest.responseText || '[]'));
+                // FTMS expects jQuery's default form encoding rather than JSON.
+                const historyResponse = await fetch('/ihub/Email/GetEmailByCode', {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'X-Requested-With': 'XMLHttpRequest' },
+                  body: new URLSearchParams({ code: {{code}} }).toString()
+                });
+                if (historyResponse.ok) {
+                  let history = unwrapRows(await historyResponse.json());
                   if (history.length) {
                     const dateValue = value => {
                       const fallback = Object.entries(value || {}).find(([key, fieldValue]) =>
@@ -411,7 +419,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       const emailId = mail.id || mail.Id || mail.emailHistoryId || mail.EmailHistoryId;
                       const fileId = mail.fileId || mail.FileId || mail.FILEID || mail.FILE_ID || mail.emailFileId || mail.EmailFileId;
                       let body = mail.contents || mail.Contents || mail.content || mail.Content || mail.body || mail.Body || '';
-                      if (fileId) body = readMailFile(fileId) || body;
+                      if (fileId) body = await readMailFile(fileId) || body;
                       if (String(body).trim() === String(mail.subject || mail.Subject || '').trim()) body = '';
                       let sender = [mail.mailPoster, mail.MailPoster, mail.posterEmail, mail.PosterEmail,
                         mail.poster, mail.Poster, mail.senderEmail, mail.SenderEmail, mail.sender, mail.Sender,
@@ -444,9 +452,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   }
                 }
                 const form = new FormData(); form.append('id', 'C88'); form.append('body', JSON.stringify({ p_strCode: {{code}} }));
-                const metaRequest = new XMLHttpRequest(); metaRequest.open('POST', '/ihub/code/code', false); metaRequest.send(form);
-                if (metaRequest.status < 200 || metaRequest.status >= 300) return JSON.stringify(null);
-                const meta = JSON.parse(metaRequest.responseText);
+                const metaResponse = await fetch('/ihub/code/code', {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  body: form
+                });
+                if (!metaResponse.ok) return JSON.stringify(null);
+                const meta = await metaResponse.json();
                 const rows = unwrapRows(meta);
                 if (!rows.length) return JSON.stringify(null);
                 const historyValue = row => {
@@ -471,7 +483,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     return null;
                   };
                   const fileId = field('FILEID', 'FILE_ID', 'EMAIL_FILE_ID'); let body = '';
-                  if (fileId) body = readMailFile(fileId);
+                  if (fileId) body = await readMailFile(fileId);
                   const emailId = field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID');
                   const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
                   const parsedSentAt = parseMailDate(rawSentAt);
@@ -495,7 +507,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               } catch { return JSON.stringify(null); }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
         return DeserializeLatestEmail(json);
     }
 
@@ -506,15 +518,15 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             ? "case" : "request";
         var expectedStatus = (int)status;
         var script = $$"""
-            (() => {
+            (async () => {
               try {
                 // The ticket page loads its timeline asynchronously from this API.
                 // The HTML returned by /edit/{code} does not contain the rendered entries.
-                const timelineRequest = new XMLHttpRequest();
-                timelineRequest.open('GET', '/ihub/{{route}}/GetTimeLineByCode?code=' + encodeURIComponent({{code}}), false);
-                timelineRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                timelineRequest.send();
-                if (timelineRequest.status >= 200 && timelineRequest.status < 300) {
+                const timelineResponse = await fetch('/ihub/{{route}}/GetTimeLineByCode?code=' + encodeURIComponent({{code}}), {
+                  credentials: 'same-origin',
+                  headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                if (timelineResponse.ok) {
                   const unwrap = (value, depth = 0) => {
                     if (depth > 6 || value == null) return [];
                     if (Array.isArray(value)) return value;
@@ -537,7 +549,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     const parsed = new Date(local ? raw.replace(' ', 'T') + '+07:00' : raw);
                     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
                   };
-                  const rows = unwrap(JSON.parse(timelineRequest.responseText || '[]'))
+                  const rows = unwrap(await timelineResponse.json())
                     .map(row => ({ status: Number(row.status ?? row.Status ?? row.statusId ?? row.StatusId),
                       occurredAt: parseDate(row.createDate ?? row.CreateDate ?? row.date ?? row.Date),
                       // The FTMS timeline labels "Thực hiện" with the assigned staff.
@@ -554,11 +566,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor });
                   }
                 }
-                const xhr = new XMLHttpRequest();
-                xhr.open('GET', '/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), false);
-                xhr.send();
-                if (xhr.status < 200 || xhr.status >= 300) return JSON.stringify(null);
-                const doc = new DOMParser().parseFromString(xhr.responseText, 'text/html');
+                const editResponse = await fetch('/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), {
+                  credentials: 'same-origin'
+                });
+                if (!editResponse.ok) return JSON.stringify(null);
+                const doc = new DOMParser().parseFromString(await editResponse.text(), 'text/html');
                 const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
                 const statusMap = { 'mới': 0, 'tạo mới': 0, 'phân công': 1, 'đang thực hiện': 2,
                   'hoàn thành': 3, 'tạm ngưng': 4, 'đóng': 5, 'đã đóng': 5, 'hủy': 7, 'đã hủy': 7,
@@ -579,7 +591,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               } catch { return JSON.stringify(null); }
             })()
             """;
-        var json = await ExecuteJsonStringAsync(script);
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
         if (string.IsNullOrWhiteSpace(json) || json == "null") return null;
         try
         {
@@ -667,6 +679,53 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var raw = await operation;
         try { return JsonSerializer.Deserialize<string>(raw) ?? "null"; }
         catch (JsonException) { return raw; }
+    }
+
+    private async Task<string> ExecuteAsyncJsonStringAsync(string script, CancellationToken cancellationToken)
+    {
+        var requestId = Guid.NewGuid().ToString("N");
+        var completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<CoreWebView2WebMessageReceivedEventArgs> handler = (_, args) =>
+        {
+            try
+            {
+                using var payload = JsonDocument.Parse(args.WebMessageAsJson);
+                var root = payload.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !root.TryGetProperty("type", out var type) || type.GetString() != "ftms-async-result" ||
+                    !root.TryGetProperty("id", out var id) || id.GetString() != requestId) return;
+                if (root.TryGetProperty("error", out var error))
+                    completion.TrySetException(new InvalidOperationException(error.ToString()));
+                else if (root.TryGetProperty("value", out var value))
+                    completion.TrySetResult(value.ValueKind == JsonValueKind.String ? value.GetString() ?? "null" : value.GetRawText());
+            }
+            catch (JsonException) { }
+        };
+        var code = $$"""
+            (() => {
+              Promise.resolve({{script}}).then(
+                value => chrome.webview.postMessage({ type: 'ftms-async-result', id: '{{requestId}}', value }),
+                error => chrome.webview.postMessage({ type: 'ftms-async-result', id: '{{requestId}}', error: String(error) })
+              );
+            })()
+            """;
+        await webView.Dispatcher.InvokeAsync(() => webView.CoreWebView2.WebMessageReceived += handler);
+        try
+        {
+            var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(code));
+            await operation.WaitAsync(cancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            try { return await completion.Task.WaitAsync(timeout.Token); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("FTMS API không phản hồi trong 30 giây.");
+            }
+        }
+        finally
+        {
+            await webView.Dispatcher.InvokeAsync(() => webView.CoreWebView2.WebMessageReceived -= handler);
+        }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
