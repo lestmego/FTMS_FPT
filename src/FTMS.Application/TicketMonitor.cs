@@ -11,11 +11,15 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     private int _lastCleanupDay = -1;
     public event Action<string>? StatusChanged;
     public event Action<DashboardSummary>? SummaryChanged;
+    public event Action? DailyCleanupCompleted;
+    public DateTimeOffset LastCleanupTime => _lastCleanupTime;
+    public int LastCleanupDay => _lastCleanupDay;
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await store.InitializeAsync(cancellationToken);
         foreach (var item in await store.LoadActiveSnapshotsAsync(cancellationToken)) _active[item.Key] = item.Value;
+        await CheckAndRunDailyCleanupAsync(cancellationToken);
     }
 
     public async Task RunAsync(Func<bool> userIsActive, CancellationToken cancellationToken)
@@ -133,8 +137,28 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             personal.Count(x => x.Status == TicketStatus.InProgress),
             personal.Count(x => x.Status == TicketStatus.Paused),
             personalClosedToday));
-        await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
+        await CheckAndRunDailyCleanupAsync(cancellationToken);
         StatusChanged?.Invoke($"Đồng bộ {tickets.Count} ticket, đang theo dõi {_active.Count}");
+    }
+
+    private async Task CheckAndRunDailyCleanupAsync(CancellationToken cancellationToken)
+    {
+        var vietnamNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var currentDay = vietnamNow.Year * 1000 + vietnamNow.DayOfYear;
+        if (_lastCleanupDay == currentDay) return;
+
+        try
+        {
+            await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
+            _lastCleanupDay = currentDay;
+            _lastCleanupTime = vietnamNow;
+            DailyCleanupCompleted?.Invoke();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"Lỗi dọn dẹp hàng ngày: {ex.Message}");
+        }
     }
 
     private static string? NormalizeUserName(string? value)

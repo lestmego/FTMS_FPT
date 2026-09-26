@@ -48,6 +48,30 @@ public sealed class TicketMonitorTests
         Assert.Equal(1, summary?.PersonalClosedToday);
     }
 
+    [Fact]
+    public async Task RunsDailyCleanupOnlyOncePerDayAcrossMultiplePolls()
+    {
+        var store = new MemoryStore();
+        var client = new FakeFtmsClient(null, []);
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        var cleanupCompletedFired = 0;
+        monitor.DailyCleanupCompleted += () => cleanupCompletedFired++;
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        Assert.Equal(1, store.CleanupCallCount);
+        Assert.Equal(1, cleanupCompletedFired);
+
+        // Multiple subsequent syncs on the same day should NOT trigger CleanupAsync again
+        await monitor.SyncNowAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        Assert.Equal(1, store.CleanupCallCount);
+        Assert.Equal(1, cleanupCompletedFired);
+        Assert.True(monitor.LastCleanupDay > 0);
+    }
+
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
         string? closedByName, long? assigneeId) => new()
     {
@@ -79,6 +103,7 @@ public sealed class TicketMonitorTests
 
     private sealed class MemoryStore : ITicketStore
     {
+        public int CleanupCallCount { get; private set; }
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<IReadOnlyDictionary<string, TicketSnapshot>> LoadActiveSnapshotsAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyDictionary<string, TicketSnapshot>>(new Dictionary<string, TicketSnapshot>());
@@ -88,7 +113,11 @@ public sealed class TicketMonitorTests
         public Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task SaveEventAndEnqueueNotificationAsync(TicketEvent ticketEvent, string? message, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken)
+        {
+            CleanupCallCount++;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class NullSender : INotificationSender

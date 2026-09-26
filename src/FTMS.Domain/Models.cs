@@ -124,7 +124,7 @@ public sealed record AppSettings
     public string TelegramBotToken { get; init; } = string.Empty;
     public string TelegramChatId { get; init; } = string.Empty;
     public int[] SlaThresholds { get; init; } = [5, 3, 1];
-    public int TerminalRetentionDays { get; init; } = 30;
+    public int TerminalRetentionDays { get; init; } = 1;
     public bool UnprocessedIsTerminal { get; init; } = true;
 }
 

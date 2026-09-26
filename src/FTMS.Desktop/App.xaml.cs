@@ -15,6 +15,8 @@ public partial class App : System.Windows.Application
     public App()
     {
         DispatcherUnhandledException += OnDispatcherUnhandledException;
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
+        DailyLogCleaner.Clean(root);
     }
 
     private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

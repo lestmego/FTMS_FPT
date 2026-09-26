@@ -347,6 +347,7 @@ public partial class CompactWindow : Window
             {
                 if (_activeAccountId == accountId) UpdateDashboard(summary);
             });
+            monitor.DailyCleanupCompleted += () => DailyLogCleaner.Clean(root);
             await Task.Run(() => monitor.InitializeAsync(accountLifetime.Token));
             if (accountLifetime.IsCancellationRequested || _expectedAccountId != accountId) return;
             _monitor = monitor;

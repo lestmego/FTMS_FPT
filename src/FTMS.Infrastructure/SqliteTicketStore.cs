@@ -68,7 +68,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var terminal = command.Parameters.Add("$terminal", SqliteType.Integer);
         var updated = command.Parameters.Add("$updated", SqliteType.Text);
         var terminalAt = command.Parameters.Add("$terminalAt", SqliteType.Text);
-        var now = DateTimeOffset.Now.ToString("O");
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).ToString("O");
 
         foreach (var item in snapshots)
         {
@@ -88,7 +88,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
 
     public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken ct) => ExecuteAsync(
         "UPDATE ticket_snapshots SET is_terminal=1,terminal_at=$terminalAt WHERE code=$code", ct,
-        ("$terminalAt", terminalAt.ToString("O")), ("$code", code));
+        ("$terminalAt", terminalAt.ToOffset(TimeSpan.FromHours(7)).ToString("O")), ("$code", code));
 
     public Task SaveEventAsync(TicketEvent item, CancellationToken ct) => ExecuteAsync("""
         INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at) VALUES($key,$code,$type,$payload,$detected)
@@ -166,18 +166,18 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
                     SELECT event_key FROM ticket_events
                     WHERE ticket_code IN (
                         SELECT code FROM ticket_snapshots
-                        WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff)
+                        WHERE is_terminal=1 AND COALESCE(terminal_at, updated_at) < $cutoff
                     )
                 );
 
                 DELETE FROM ticket_events
                 WHERE ticket_code IN (
                     SELECT code FROM ticket_snapshots
-                    WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff)
+                    WHERE is_terminal=1 AND COALESCE(terminal_at, updated_at) < $cutoff
                 );
 
                 DELETE FROM ticket_snapshots
-                WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff);
+                WHERE is_terminal=1 AND COALESCE(terminal_at, updated_at) < $cutoff;
 
                 PRAGMA optimize;
                 """;
