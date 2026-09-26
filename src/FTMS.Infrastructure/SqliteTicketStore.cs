@@ -105,52 +105,80 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         "INSERT OR IGNORE INTO notification_outbox(event_key,message,next_attempt_at) VALUES($key,$message,$next)", ct,
         ("$key", item.EventKey), ("$message", message), ("$next", DateTimeOffset.Now.ToString("O")));
 
+    public async Task SaveEventAndEnqueueNotificationAsync(TicketEvent item, string? message, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct);
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at)
+            VALUES($key,$code,$type,$payload,$detected);
+            """;
+        command.Parameters.AddWithValue("$key", item.EventKey);
+        command.Parameters.AddWithValue("$code", item.TicketCode);
+        command.Parameters.AddWithValue("$type", item.EventType.ToString());
+        command.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(item));
+        command.Parameters.AddWithValue("$detected", item.DetectedAt.ToString("O"));
+        await command.ExecuteNonQueryAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            var outboxCmd = connection.CreateCommand();
+            outboxCmd.Transaction = transaction;
+            outboxCmd.CommandText = """
+                INSERT OR IGNORE INTO notification_outbox(event_key,message,next_attempt_at)
+                VALUES($key,$message,$next);
+                """;
+            outboxCmd.Parameters.AddWithValue("$key", item.EventKey);
+            outboxCmd.Parameters.AddWithValue("$message", message);
+            outboxCmd.Parameters.AddWithValue("$next", DateTimeOffset.Now.ToString("O"));
+            await outboxCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
     public async Task CleanupAsync(int days, CancellationToken ct)
     {
-        var cutoff = DateTimeOffset.Now.AddDays(-Math.Max(1, days)).ToString("O");
+        var todayVietnam = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).Date;
+        var startOfToday = new DateTimeOffset(todayVietnam, TimeSpan.FromHours(7));
+        var cutoff = (days <= 1 ? startOfToday : DateTimeOffset.Now.AddDays(-Math.Max(1, days))).ToString("O");
         await using (var connection = new SqliteConnection(ConnectionString))
         {
             await connection.OpenAsync(ct);
             var command = connection.CreateCommand();
             command.CommandText = """
-                DELETE FROM ticket_events
-                WHERE event_key IN (
-                    SELECT event_key FROM notification_outbox
-                    WHERE sent_at IS NULL AND (
-                        TRIM(message)='' OR message LIKE $missingBody OR attempt_count>=20 OR
-                        event_key IN (SELECT event_key FROM ticket_events WHERE detected_at<$cutoff)
-                    )
-                );
                 DELETE FROM notification_outbox
-                WHERE sent_at IS NOT NULL OR TRIM(message)='' OR message LIKE $missingBody OR attempt_count>=20 OR
-                    event_key NOT IN (SELECT event_key FROM ticket_events);
+                WHERE sent_at IS NOT NULL AND sent_at < $cutoff;
+
+                DELETE FROM notification_outbox
+                WHERE sent_at IS NULL AND (TRIM(message)='' OR message LIKE $missingBody);
+
+                DELETE FROM ticket_events
+                WHERE detected_at < $cutoff AND event_key NOT IN (
+                    SELECT event_key FROM notification_outbox WHERE sent_at IS NULL
+                );
 
                 DELETE FROM notification_outbox
                 WHERE event_key IN (
                     SELECT event_key FROM ticket_events
                     WHERE ticket_code IN (
-                        SELECT terminal.ticket_code FROM ticket_events terminal
-                        WHERE terminal.event_type='Terminal' AND NOT EXISTS (
-                            SELECT 1 FROM notification_outbox pending
-                            JOIN ticket_events pending_event ON pending_event.event_key=pending.event_key
-                            WHERE pending_event.ticket_code=terminal.ticket_code AND pending.sent_at IS NULL
-                        )
+                        SELECT code FROM ticket_snapshots
+                        WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff)
                     )
                 );
+
                 DELETE FROM ticket_events
                 WHERE ticket_code IN (
-                    SELECT terminal.ticket_code FROM ticket_events terminal
-                    WHERE terminal.event_type='Terminal' AND NOT EXISTS (
-                        SELECT 1 FROM notification_outbox pending
-                        JOIN ticket_events pending_event ON pending_event.event_key=pending.event_key
-                        WHERE pending_event.ticket_code=terminal.ticket_code AND pending.sent_at IS NULL
-                    )
+                    SELECT code FROM ticket_snapshots
+                    WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff)
                 );
-                DELETE FROM ticket_snapshots WHERE is_terminal=1;
-                DELETE FROM ticket_events
-                WHERE detected_at<$cutoff AND event_key NOT IN (
-                    SELECT event_key FROM notification_outbox WHERE sent_at IS NULL
-                );
+
+                DELETE FROM ticket_snapshots
+                WHERE is_terminal=1 AND (terminal_at < $cutoff OR updated_at < $cutoff);
+
                 PRAGMA optimize;
                 """;
             command.Parameters.AddWithValue("$cutoff", cutoff);

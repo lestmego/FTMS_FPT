@@ -3,6 +3,7 @@ using System.Data;
 using System.Windows;
 using System.IO;
 using System.Windows.Threading;
+using FTMS.Infrastructure;
 
 namespace FTMS.Desktop;
 
@@ -20,8 +21,10 @@ public partial class App : System.Windows.Application
     {
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
         Directory.CreateDirectory(root);
-        File.AppendAllText(Path.Combine(root, "error.log"), $"{DateTimeOffset.Now:O} {e.Exception}\n\n");
-        System.Windows.MessageBox.Show($"FTMS Companion g\u1eb7p l\u1ed7i: {e.Exception.Message}", "FTMS Companion", MessageBoxButton.OK, MessageBoxImage.Error);
+        File.AppendAllText(Path.Combine(root, "error.log"),
+            $"{DateTimeOffset.Now:O} {TelegramErrorSanitizer.Sanitize(e.Exception.ToString())}\n\n");
+        System.Windows.MessageBox.Show($"FTMS Companion g\u1eb7p l\u1ed7i: {TelegramErrorSanitizer.Sanitize(e.Exception.Message)}",
+            "FTMS Companion", MessageBoxButton.OK, MessageBoxImage.Error);
         e.Handled = true;
     }
 }

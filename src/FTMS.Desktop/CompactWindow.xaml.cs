@@ -1,7 +1,6 @@
 using System.IO;
 using System.ComponentModel;
 using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
@@ -21,7 +20,8 @@ public partial class CompactWindow : Window
     private readonly DispatcherTimer _refreshTimer = new();
     private readonly DispatcherTimer _telegramTimer = new() { Interval = TimeSpan.FromSeconds(4) };
     private readonly HttpClient _http;
-    private readonly string _telegramOffsetPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion", "telegram.offset");
+    private readonly string _stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
+    private TelegramCallbackReceiver? _telegramReceiver;
     private TicketMonitor? _monitor;
     private WebViewFtmsClient? _ftmsClient;
     private WebViewLoginRecovery? _displayLoginRecovery;
@@ -37,7 +37,6 @@ public partial class CompactWindow : Window
     private bool _settingsOpen;
     private bool _refreshInProgress;
     private bool _manualLoginNotificationShown;
-    private long _telegramUpdateOffset;
     private bool _checkingTelegram;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
@@ -48,10 +47,19 @@ public partial class CompactWindow : Window
         InitializeComponent(); _settingsStore.Load(); _http = TelegramHttpClientFactory.Create(() => _settingsStore.Current); Loaded += InitializeAsync;
         Closed += (_, _) => { _lifetime.Cancel(); _accountLifetime?.Cancel(); _refreshTimer.Stop(); _telegramTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
         Closing += OnWindowClosing;
-        StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) HideToTray(); };
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
         _telegramTimer.Tick += async (_, _) => await CheckTelegramActionsAsync();
         InitializeTrayIcon();
+    }
+
+    private static void BlockFtmsBot(CoreWebView2 webView, CoreWebView2Environment environment)
+    {
+        webView.AddWebResourceRequestedFilter(FtmsBotBlockerScript.Source, CoreWebView2WebResourceContext.Script);
+        webView.WebResourceRequested += (_, args) =>
+        {
+            if (!args.Request.Uri.StartsWith(FtmsBotBlockerScript.Source, StringComparison.OrdinalIgnoreCase)) return;
+            args.Response = environment.CreateWebResourceResponse(Stream.Null, 403, "Blocked", "Content-Type: application/javascript");
+        };
     }
 
     private void InitializeTrayIcon()
@@ -100,12 +108,12 @@ public partial class CompactWindow : Window
 
     private async void InitializeAsync(object sender, RoutedEventArgs e)
     {
-        if (File.Exists(_telegramOffsetPath) && long.TryParse(File.ReadAllText(_telegramOffsetPath), out var savedOffset))
-            _telegramUpdateOffset = savedOffset;
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
+        var root = _stateDirectory;
         var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: Path.Combine(root, "WebView2"));
         await FtmsWebView.EnsureCoreWebView2Async(environment);
         await MonitorWebView.EnsureCoreWebView2Async(environment);
+        BlockFtmsBot(FtmsWebView.CoreWebView2, environment);
+        BlockFtmsBot(MonitorWebView.CoreWebView2, environment);
         FtmsWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         FtmsWebView.CoreWebView2.WebResourceResponseReceived += OnVisibleFtmsResponseReceived;
         FtmsWebView.CoreWebView2.NavigationStarting += (_, args) =>
@@ -119,10 +127,18 @@ public partial class CompactWindow : Window
         FtmsWebView.CoreWebView2.SourceChanged += (_, _) => UpdateCurrentPage();
         MonitorWebView.NavigationCompleted += OnMonitorNavigationCompleted;
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStickyPagerScript.Value);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
+        await MonitorWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
         _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsUrl));
         _displayLoginRecovery.StatusChanged += OnLoginRecoveryStatusChanged;
         _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsUrl);
         _visibleIdentityClient = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
+        _telegramReceiver = new TelegramCallbackReceiver(_stateDirectory,
+            () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId),
+            _http, ClaimTicketFromTelegramAsync,
+            message => Dispatcher.BeginInvoke(() => MonitorText.Text = TelegramErrorSanitizer.Sanitize(
+                message, _settingsStore.Current.TelegramToken)));
         _ftmsClient.LoginRecoveryStatusChanged += OnMonitorLoginRecoveryStatusChanged;
         ApplyRefreshSettings();
         _telegramTimer.Start();
@@ -408,138 +424,34 @@ public partial class CompactWindow : Window
 
     private async Task CheckTelegramActionsAsync()
     {
-        var token = _settingsStore.Current.TelegramToken;
-        if (_checkingTelegram || string.IsNullOrWhiteSpace(token) || _activeAccountId is null) return;
+        if (_checkingTelegram || _telegramReceiver is null || _activeAccountId is null) return;
         _checkingTelegram = true;
-        try
-        {
-            var url = $"https://api.telegram.org/bot{token}/getUpdates?offset={_telegramUpdateOffset}&timeout=0&allowed_updates=%5B%22callback_query%22%5D";
-            using var response = await _http.GetAsync(url, _lifetime.Token);
-            if (!response.IsSuccessStatusCode) return;
-            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(_lifetime.Token));
-            if (!json.RootElement.TryGetProperty("result", out var results)) return;
-            foreach (var update in results.EnumerateArray())
-            {
-                var updateId = update.GetProperty("update_id").GetInt64();
-                _telegramUpdateOffset = Math.Max(_telegramUpdateOffset, updateId + 1);
-                Directory.CreateDirectory(Path.GetDirectoryName(_telegramOffsetPath)!);
-                File.WriteAllText(_telegramOffsetPath, _telegramUpdateOffset.ToString());
-                if (!update.TryGetProperty("callback_query", out var callback)) continue;
-                var callbackChatId = callback.TryGetProperty("message", out var callbackMessage) &&
-                    callbackMessage.TryGetProperty("chat", out var callbackChat) && callbackChat.TryGetProperty("id", out var callbackChatIdElement)
-                    ? callbackChatIdElement.ToString() : string.Empty;
-                if (!string.Equals(callbackChatId, _settingsStore.Current.TelegramChatId.Trim(), StringComparison.Ordinal))
-                {
-                    if (callback.TryGetProperty("id", out var deniedCallbackId))
-                        await _http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/answerCallbackQuery", new
-                        {
-                            callback_query_id = deniedCallbackId.GetString(),
-                            text = "Chat này không được phép thao tác ticket.",
-                            show_alert = true
-                        }, _lifetime.Token);
-                    continue;
-                }
-                var callbackId = callback.GetProperty("id").GetString();
-                var data = callback.TryGetProperty("data", out var dataElement) ? dataElement.GetString() : null;
-                if (data?.StartsWith("receive:", StringComparison.Ordinal) != true) continue;
-                var code = data["receive:".Length..];
-                var result = await ReceiveTicketAsync(code);
-                if (result && callback.TryGetProperty("message", out var sourceMessage) &&
-                    sourceMessage.TryGetProperty("message_id", out var messageIdElement))
-                {
-                    var route = code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || code.StartsWith("AL", StringComparison.OrdinalIgnoreCase)
-                        ? "case" : "request";
-                    await _http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/editMessageReplyMarkup", new
-                    {
-                        chat_id = callbackChatId,
-                        message_id = messageIdElement.GetInt64(),
-                        reply_markup = new
-                        {
-                            inline_keyboard = new object[][]
-                            {
-                                [new { text = "🔎 Mở ticket", url = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(code)}" }]
-                            }
-                        }
-                    }, _lifetime.Token);
-                }
-                await _http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/answerCallbackQuery", new
-                {
-                    callback_query_id = callbackId,
-                    text = result ? $"Đã gửi yêu cầu nhận {code}" : $"Chưa tìm thấy {code} trong danh sách FTMS",
-                    show_alert = !result
-                }, _lifetime.Token);
-            }
-        }
+        try { await _telegramReceiver.CheckAsync(_lifetime.Token); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception ex) { MonitorText.Text = $"Lỗi thao tác Telegram: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            MonitorText.Text = $"Lỗi thao tác Telegram: " +
+                TelegramErrorSanitizer.Sanitize(ex.Message, _settingsStore.Current.TelegramToken);
+        }
         finally { _checkingTelegram = false; }
     }
 
-    private async Task<bool> ReceiveTicketAsync(string code)
+    private async Task<TicketClaimResult> ClaimTicketFromTelegramAsync(string code, CancellationToken cancellationToken)
     {
         var accountId = _activeAccountId;
-        if (MonitorWebView.CoreWebView2 is null || accountId is null ||
-            _accountLifetime?.IsCancellationRequested != false) return false;
-        var serializedCode = JsonSerializer.Serialize(code);
-        var script = $$"""
-            (() => {
-              const code = {{serializedCode}};
-              const expectedUserId = {{accountId.Value}};
-              try {
-                const grid = window.jQuery?.('#list-grid').data('kendoGrid');
-                const item = grid?.dataSource?.data()?.find(x => String(x.code || x.Code) === code);
-                let ticketId = item?.id || item?.Id;
-                if (!ticketId) {
-                  const body = new URLSearchParams({ take: '20', skip: '0', page: '1', pageSize: '20',
-                    search: code, isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
-                    alarmType: '0', isSortByDate: '' });
-                  const findRequest = new XMLHttpRequest();
-                  findRequest.open('POST', '/ihub/request/GetListRequestV12', false);
-                  findRequest.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-                  findRequest.send(body.toString());
-                  if (findRequest.status < 200 || findRequest.status >= 300) return false;
-                  const response = JSON.parse(findRequest.responseText);
-                  const findRows = value => {
-                    if (Array.isArray(value)) return value;
-                    if (!value || typeof value !== 'object') return [];
-                    for (const key of ['data','Data','rows','Rows','items','Items','result','Result']) {
-                      const rows = findRows(value[key]); if (rows.length) return rows;
-                    }
-                    return [];
-                  };
-                  const ticket = findRows(response).find(x => String(x.code || x.Code || x.requestCode || x.RequestCode) === code);
-                  ticketId = ticket?.id || ticket?.Id;
-                }
-                if (!ticketId || Number(globalThis.userID) !== expectedUserId ||
-                    typeof Username === 'undefined') return false;
-                const endpoint = /^(CA|AL)/i.test(code)
-                  ? '/ihub/Case/TakeAndAssignmentV12'
-                  : '/ihub/Request/TakeAndAssignmentV12';
-                const payload = { input: { id_Ticket: ticketId, creator: Username, staff_ID: userID,
-                  staffName: Username, departmentName: DepartmentName, department_ID: UserDept,
-                  createDate: Date.now(), type: 2, code, ticketStatus: 2 }, type: 2 };
-                const receiveRequest = new XMLHttpRequest();
-                receiveRequest.open('POST', endpoint, false);
-                receiveRequest.setRequestHeader('Content-Type', 'application/json; charset=UTF-8');
-                receiveRequest.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                receiveRequest.send(JSON.stringify(payload));
-                if (receiveRequest.status < 200 || receiveRequest.status >= 300) return false;
-                const result = JSON.parse(receiveRequest.responseText || '{}');
-                return result.result === true || String(result.status || '').toLowerCase() === 'ok';
-              } catch {}
-              return false;
-            })()
-            """;
-        var result = await MonitorWebView.ExecuteScriptAsync(script);
-        if (_activeAccountId != accountId || _accountLifetime?.IsCancellationRequested != false) return false;
-        var success = string.Equals(result, "true", StringComparison.OrdinalIgnoreCase);
-        if (success && _monitor is not null && _accountLifetime is not null)
+        var accountLifetime = _accountLifetime;
+        var client = _ftmsClient;
+        if (accountId is not long activeAccountId || accountLifetime?.IsCancellationRequested != false || client is null)
+            return new TicketClaimResult(TicketClaimStatus.RetryableFailure, "FTMS Companion chưa sẵn sàng.");
+
+        var result = await client.ClaimTicketAsync(code, activeAccountId, cancellationToken);
+        if (result.IsSuccess && _activeAccountId == activeAccountId && _monitor is not null)
         {
-            var monitor = _monitor;
-            var accountLifetime = _accountLifetime;
-            await Task.Run(() => monitor.SyncNowAsync(accountLifetime.Token));
+            try { await Task.Run(() => _monitor.SyncNowAsync(accountLifetime.Token), accountLifetime.Token); }
+            catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
+            catch (Exception ex) { MonitorText.Text = $"Đã nhận {code}, nhưng chưa đồng bộ được: {ex.Message}"; }
         }
-        return success;
+        return result;
     }
 
     private void UpdateDashboard(DashboardSummary s)

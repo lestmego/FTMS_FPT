@@ -110,6 +110,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (typeof value === 'string') {
                   const vi = value.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
                   if (vi) return `${vi[6]}-${vi[5].padStart(2,'0')}-${vi[4].padStart(2,'0')}T${vi[1].padStart(2,'0')}:${vi[2]}:${vi[3] || '00'}+07:00`;
+                  const viDate = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                  if (viDate) return `${viDate[3]}-${viDate[2].padStart(2,'0')}-${viDate[1].padStart(2,'0')}T00:00:00+07:00`;
                   const dotNet = value.match(/\/Date\((\d+)(?:[+-]\d+)?\)\//);
                   if (dotNet) return new Date(Number(dotNet[1])).toISOString();
                   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value))
@@ -180,53 +182,95 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               })).filter(x => x.code && x.status !== null);
 
               // FTMS removes closed tickets from the active list and exposes them through the history API.
-              // Read recent closures so a Completed -> Closed transition is still detected in real time.
+              // Its history filter IDs are not the same documented contract as TicketStatus, so probe
+              // both values seen in deployed versions and validate each row by its close timestamp.
               const closedTickets = [];
-              try {
-                const formatDate = date => `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}/${date.getFullYear()}`;
-                const today = new Date();
-                const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
-                const historyParams = new URLSearchParams({
-                  searchData: JSON.stringify({ search: '', source: '-1', departmentId: '-1', staffId: '-1',
-                    serviceTypeGroup: '-1', serviceType: '-1', requestLevel: '-1', status: '6' }),
-                  fromDate: formatDate(yesterday), toDate: formatDate(today), typeSearch: '0',
-                  take: '1000', skip: '0', page: '1', pageSize: '1000'
-                });
-                const historyResponse = await fetch('/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), {
-                  credentials: 'same-origin',
-                  headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                });
-                if (historyResponse.ok) {
-                  const historyRows = unwrap(await historyResponse.json());
-                  for (const row of historyRows) {
-                    const code = String(pick(row, 'code','Code','requestCode','RequestCode') || '').trim();
-                    if (!code) continue;
-                    closedTickets.push({
-                      code, status: 5,
-                      title: pick(row, 'title','Title','subject','Subject'),
-                      createdAt: dateOf(pick(row, 'createDate','CreateDate','createdAt','CreatedAt')),
-                      updatedAt: dateOf(pick(row, 'closeDate','CloseDate','updatedAt','UpdatedAt')),
-                      updatedBy: pick(row, 'userName','UserName','closedBy','ClosedBy','updatedBy','UpdatedBy'),
-                      assigneeId: numberOf(pick(row, 'staffId','StaffId','agentId','AgentId')),
-                      assigneeName: pick(row, 'userName','UserName','agentName','AgentName','staffName','StaffName'),
-                      departmentId: numberOf(pick(row, 'departmentId','DepartmentId','deptId','DeptId')),
-                      departmentName: pick(row, 'departmentName','DepartmentName','department','Department'),
-                      slaDeviationMinutes: null, slaType: null
+              const historyErrors = [];
+              let historyAvailable = false;
+              const vietnamDate = offsetDays => {
+                const date = new Date(Date.now() + (7 * 60 * 60 * 1000) + offsetDays * 86400000);
+                return `${String(date.getUTCMonth() + 1).padStart(2, '0')}/${String(date.getUTCDate()).padStart(2, '0')}/${date.getUTCFullYear()}`;
+              };
+              for (const historyStatus of ['6', '5']) {
+                const seenPageKeys = new Set();
+                for (let page = 1; page <= 50; page++) {
+                  const historyParams = new URLSearchParams({
+                    searchData: JSON.stringify({ search: '', source: '-1', departmentId: '-1', staffId: '-1',
+                      serviceTypeGroup: '-1', serviceType: '-1', requestLevel: '-1', status: historyStatus }),
+                    fromDate: vietnamDate(-1), toDate: vietnamDate(1), typeSearch: '0',
+                    take: '1000', skip: String((page - 1) * 1000), page: String(page), pageSize: '1000'
+                  });
+                  try {
+                    const historyResponse = await fetch('/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), {
+                      credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(historyResponse.url).pathname))
+                      throw new Error('FTMS history HTTP 401');
+                    if (!historyResponse.ok) throw new Error(`FTMS history HTTP ${historyResponse.status}`);
+                    const historyPayload = await historyResponse.json();
+                    const historyRows = unwrap(historyPayload);
+                    if (!Array.isArray(historyRows)) throw new Error('FTMS history JSON không có danh sách dữ liệu');
+                    historyAvailable = true;
+                    if (!historyRows.length) break;
+                    const pageKey = historyRows.map(row => String(pick(row, 'id','Id','code','Code','requestCode','RequestCode') || '')).join('|');
+                    if (seenPageKeys.has(pageKey)) break;
+                    seenPageKeys.add(pageKey);
+                    for (const row of historyRows) {
+                      const code = String(pick(row, 'code','Code','requestCode','RequestCode','REQUEST_CODE') || '').trim();
+                      const explicitClosedAt = pick(row, 'closeDate','CloseDate','closedAt','ClosedAt','closedDate','ClosedDate',
+                        'completionDate','CompletionDate');
+                      const rowStatus = pick(row, 'status','Status','statusId','StatusId');
+                      const rowStatusName = String(pick(row, 'statusName','StatusName','statusText','StatusText') || '')
+                        .trim().toLocaleLowerCase('vi-VN');
+                      const isClosedRow = explicitClosedAt || Number(rowStatus) === 5 ||
+                        ['đóng','đã đóng','closed'].includes(rowStatusName);
+                      const closedAt = isClosedRow ? dateOf(explicitClosedAt ??
+                        pick(row, 'updateDate','UpdateDate','updatedAt','UpdatedAt')) : null;
+                      if (!code || !closedAt) continue;
+                      const closedByName = pick(row, 'closedByName','ClosedByName','closedBy','ClosedBy','userName','UserName',
+                        'updatedBy','UpdatedBy','closeUserName','CloseUserName','staffName','StaffName','agentName','AgentName');
+                      closedTickets.push({
+                        code, status: 5,
+                        title: pick(row, 'title','Title','subject','Subject','REQUEST_TITLE'),
+                        createdAt: dateOf(pick(row, 'createDate','CreateDate','createdAt','CreatedAt','CREATE_DATE')),
+                        updatedAt: closedAt, closedAt,
+                        updatedBy: closedByName,
+                        closedByUserId: numberOf(pick(row, 'closedByUserId','ClosedByUserId','closedById','ClosedById',
+                          'closeUserId','CloseUserId','userId','UserId','USER_ID','staffId','StaffId','agentId','AgentId')),
+                        closedByName,
+                        assigneeId: numberOf(pick(row, 'assigneeId','AssigneeId','assignedStaffId','AssignedStaffId','ASSIGNEE_ID')),
+                        assigneeName: pick(row, 'assigneeName','AssigneeName','assignedStaffName','AssignedStaffName'),
+                        departmentId: numberOf(pick(row, 'departmentId','DepartmentId','deptId','DeptId')),
+                        departmentName: pick(row, 'departmentName','DepartmentName','department','Department'),
+                        slaDeviationMinutes: null, slaType: null
+                      });
+                    }
+                    if (historyRows.length < 1000) break;
+                  } catch (error) {
+                    historyErrors.push(`${historyStatus}: ${String(error)}`);
+                    break;
                   }
                 }
-              } catch {}
+              }
+              if (!historyAvailable)
+                return JSON.stringify({ error: historyErrors.join('; ') || 'Không thể đọc lịch sử đóng ticket FTMS' });
 
-              // The endpoint can repeat a request in overlapping pages. Keep the first row because
-              // FTMS sorts the current list before older/secondary representations of the same code.
+              // Prefer the newest authoritative representation. A newer active row means the ticket
+              // was reopened; otherwise a validated close-history row must not be hidden by stale active data.
               const byCode = new Map();
               for (const ticket of tickets) {
                 const key = ticket.code.toLocaleUpperCase('vi-VN');
-                if (!byCode.has(key)) byCode.set(key, ticket);
+                const current = byCode.get(key);
+                if (!current || (!current.updatedAt && ticket.updatedAt) ||
+                    (ticket.updatedAt && current.updatedAt && new Date(ticket.updatedAt) > new Date(current.updatedAt)))
+                  byCode.set(key, ticket);
               }
               for (const ticket of closedTickets) {
                 const key = ticket.code.toLocaleUpperCase('vi-VN');
-                if (!byCode.has(key)) byCode.set(key, ticket);
+                const current = byCode.get(key);
+                const closedTime = new Date(ticket.closedAt).getTime();
+                const currentTime = current?.updatedAt ? new Date(current.updatedAt).getTime() : Number.NEGATIVE_INFINITY;
+                if (!current || current.status === 5 || closedTime >= currentTime) byCode.set(key, ticket);
               }
               const allTickets = Array.from(byCode.values());
               return JSON.stringify({ data: allTickets, count: allTickets.length });
@@ -248,6 +292,183 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             throw new InvalidOperationException(message);
         }
         return DeserializeTickets(root.GetRawText());
+    }
+
+    public async Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken)
+    {
+        var normalizedCode = ticketCode?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalizedCode))
+            return new TicketClaimResult(TicketClaimStatus.NotFound, "Mã ticket không hợp lệ.");
+
+        var identity = await GetCurrentUserAsync(cancellationToken);
+        if (identity?.UserId != expectedUserId)
+            return new TicketClaimResult(TicketClaimStatus.AuthenticationRequired,
+                "Tài khoản FTMS đang đăng nhập không khớp với tài khoản giám sát.");
+        if (string.IsNullOrWhiteSpace(identity.UserName))
+            return new TicketClaimResult(TicketClaimStatus.AuthenticationRequired,
+                "FTMS chưa cung cấp tên tài khoản để nhận ticket.");
+
+        var code = JsonSerializer.Serialize(normalizedCode);
+        var script = $$"""
+            (async () => {
+              const code = {{code}};
+              const expectedUserId = {{expectedUserId}};
+              const isCase = /^(CA|AL)/i.test(code);
+              const listEndpoints = isCase
+                ? ['/ihub/case/GetListCasesV12', '/ihub/case/GetListCasesRequest']
+                : ['/ihub/request/GetListRequestV12'];
+              const claimEndpoint = isCase ? '/ihub/Case/TakeAndAssignmentV12' : '/ihub/Request/TakeAndAssignmentV12';
+              const unwrap = (value, depth = 0) => {
+                if (depth > 8 || value == null) return [];
+                if (Array.isArray(value)) return value;
+                if (typeof value === 'string') {
+                  try { return unwrap(JSON.parse(value), depth + 1); } catch { return []; }
+                }
+                if (typeof value !== 'object') return [];
+                for (const key of ['data','Data','rows','Rows','items','Items','result','Result']) {
+                  const rows = unwrap(value[key], depth + 1);
+                  if (rows.length) return rows;
+                }
+                for (const child of Object.values(value)) {
+                  const rows = unwrap(child, depth + 1);
+                  if (rows.some(x => x && typeof x === 'object')) return rows;
+                }
+                return [];
+              };
+              const pick = (row, ...keys) => {
+                for (const key of keys) if (row?.[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
+                return null;
+              };
+              const numberOf = value => {
+                const parsed = Number(value);
+                return value === null || value === undefined || value === '' || !Number.isFinite(parsed) ? null : parsed;
+              };
+              const ticketCodeOf = row => String(pick(row, 'code','Code','requestCode','RequestCode','caseCode','CaseCode') || '').trim();
+              const assigneeOf = row => numberOf(pick(row, 'staffId','StaffId','agentId','AgentId','assigneeId','AssigneeId','ASSIGNEE_ID'));
+              const statusOf = row => {
+                const numeric = numberOf(pick(row, 'status','Status','statusId','StatusId','STATUS_ID'));
+                if (numeric !== null) return numeric;
+                const name = String(pick(row, 'statusName','StatusName','statusText','StatusText') || '')
+                  .trim().toLocaleLowerCase('vi-VN');
+                return { 'đóng': 5, 'đã đóng': 5, 'closed': 5, 'hủy': 7, 'đã hủy': 7,
+                  'cancelled': 7, 'không xử lý': 8 }[name] ?? null;
+              };
+              const findTicket = async () => {
+                const body = new URLSearchParams({ take: '50', skip: '0', page: '1', pageSize: '50',
+                  search: code, isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
+                  alarmType: '0', isSortByDate: '' });
+                let hadSuccessfulResponse = false;
+                let lastError = '';
+                for (const endpoint of listEndpoints) {
+                  try {
+                    const response = await fetch(endpoint, {
+                      method: 'POST', credentials: 'same-origin',
+                      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest' }, body: body.toString()
+                    });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
+                      return { authenticationRequired: true };
+                    if (!response.ok) {
+                      lastError = `${endpoint} HTTP ${response.status}`;
+                      continue;
+                    }
+                    const rows = unwrap(await response.json());
+                    hadSuccessfulResponse = true;
+                    const row = rows.find(x =>
+                      ticketCodeOf(x).toLocaleUpperCase('vi-VN') === code.toLocaleUpperCase('vi-VN'));
+                    if (row) return { row };
+                  } catch (error) { lastError = String(error); }
+                }
+                return hadSuccessfulResponse ? {} : { retryableFailure: true, error: lastError };
+              };
+              try {
+                if (Number(globalThis.userID) !== expectedUserId || typeof globalThis.Username === 'undefined')
+                  return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên FTMS không đúng tài khoản.' });
+
+                let before = await findTicket();
+                if (before.authenticationRequired)
+                  return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                if (before.retryableFailure)
+                  return JSON.stringify({ status: 'RetryableFailure', message: before.error || 'Không đọc được danh sách FTMS.' });
+                if (!before.row) {
+                  const grid = globalThis.jQuery?.('#list-grid').data('kendoGrid');
+                  const gridRow = grid?.dataSource?.data()?.find(x =>
+                    ticketCodeOf(x).toLocaleUpperCase('vi-VN') === code.toLocaleUpperCase('vi-VN'));
+                  if (gridRow) before = { row: gridRow };
+                }
+                if (!before.row)
+                  return JSON.stringify({ status: 'NotFound', message: `Không tìm thấy ${code} trên FTMS.` });
+                const currentOwner = assigneeOf(before.row);
+                const currentStatus = statusOf(before.row);
+                if (currentOwner === expectedUserId)
+                  return JSON.stringify({ status: 'AlreadyOwnedByCurrentUser', message: `${code} đã được nhận bởi tài khoản hiện tại.` });
+                if (currentOwner && currentOwner !== expectedUserId)
+                  return JSON.stringify({ status: 'OwnedByAnotherUser', message: `${code} đã được người khác nhận.` });
+                if ([5, 7, 8].includes(currentStatus))
+                  return JSON.stringify({ status: 'NotClaimable', message: `${code} đã kết thúc, không thể nhận.` });
+
+                const ticketId = pick(before.row, 'id','Id','ticketId','TicketId','ID');
+                if (!ticketId)
+                  return JSON.stringify({ status: 'NotFound', message: `Không đọc được ID của ${code}.` });
+                const payload = { input: { id_Ticket: ticketId, creator: globalThis.Username,
+                  staff_ID: globalThis.userID, staffName: globalThis.Username,
+                  departmentName: globalThis.DepartmentName, department_ID: globalThis.UserDept,
+                  createDate: Date.now(), type: 2, code, ticketStatus: 2 }, type: 2 };
+                let serverMessage = '';
+                try {
+                  const response = await fetch(claimEndpoint, {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify(payload)
+                  });
+                  if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
+                    return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                  const text = await response.text();
+                  if (text) {
+                    try {
+                      const parsed = JSON.parse(text);
+                      serverMessage = String(parsed?.message ?? parsed?.Message ?? parsed?.error ?? parsed?.Error ?? '');
+                    } catch { serverMessage = text.slice(0, 200); }
+                  }
+                } catch (error) { serverMessage = String(error); }
+
+                for (const delay of [250, 750, 1500, 2500]) {
+                  await new Promise(resolve => setTimeout(resolve, delay));
+                  const after = await findTicket();
+                  if (after.authenticationRequired)
+                    return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                  if (after.retryableFailure) continue;
+                  if (!after.row) continue;
+                  const owner = assigneeOf(after.row);
+                  if (owner === expectedUserId)
+                    return JSON.stringify({ status: 'Claimed', message: `Đã nhận ${code} trên FTMS.` });
+                  if (owner && owner !== expectedUserId)
+                    return JSON.stringify({ status: 'OwnedByAnotherUser', message: `${code} đã được người khác nhận.` });
+                }
+                return JSON.stringify({ status: 'RetryableFailure',
+                  message: serverMessage || `FTMS chưa xác nhận ${code} đã được nhận.` });
+              } catch (error) {
+                return JSON.stringify({ status: 'RetryableFailure', message: String(error) });
+              }
+            })()
+            """;
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.String)
+            {
+                using var nested = JsonDocument.Parse(root.GetString() ?? "{}");
+                root = nested.RootElement.Clone();
+            }
+            var statusText = root.TryGetProperty("status", out var statusValue) ? statusValue.GetString() : null;
+            var message = root.TryGetProperty("message", out var messageValue) ? messageValue.GetString() : null;
+            if (Enum.TryParse<TicketClaimStatus>(statusText, out var status))
+                return new TicketClaimResult(status, message ?? "FTMS không trả về mô tả.");
+        }
+        catch (JsonException) { }
+        return new TicketClaimResult(TicketClaimStatus.RetryableFailure, "Không đọc được kết quả nhận ticket từ FTMS.");
     }
 
     private async Task<IReadOnlyList<TicketSnapshot>> GetTicketsLegacyAsync(CancellationToken cancellationToken)

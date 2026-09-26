@@ -56,6 +56,23 @@ public static class LatestEmailExtensions
 
 public sealed record StatusHistoryEntry(TicketStatus Status, DateTimeOffset? OccurredAt, string? Actor);
 
+public enum TicketClaimStatus
+{
+    Claimed,
+    AlreadyOwnedByCurrentUser,
+    OwnedByAnotherUser,
+    NotFound,
+    NotClaimable,
+    AuthenticationRequired,
+    RetryableFailure
+}
+
+public sealed record TicketClaimResult(TicketClaimStatus Status, string Message)
+{
+    public bool IsSuccess => Status is TicketClaimStatus.Claimed or TicketClaimStatus.AlreadyOwnedByCurrentUser;
+    public bool IsRetryable => Status is TicketClaimStatus.AuthenticationRequired or TicketClaimStatus.RetryableFailure;
+}
+
 public sealed record TicketSnapshot
 {
     public required string Code { get; init; }
@@ -64,6 +81,9 @@ public sealed record TicketSnapshot
     public DateTimeOffset? CreatedAt { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
     public string? UpdatedBy { get; init; }
+    public DateTimeOffset? ClosedAt { get; init; }
+    public long? ClosedByUserId { get; init; }
+    public string? ClosedByName { get; init; }
     public long? AssigneeId { get; init; }
     public string? AssigneeName { get; init; }
     public long? DepartmentId { get; init; }

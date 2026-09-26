@@ -1,0 +1,98 @@
+using FTMS.Application;
+using FTMS.Domain;
+using Xunit;
+
+namespace FTMS.Companion.Tests;
+
+public sealed class TicketMonitorTests
+{
+    [Fact]
+    public async Task CountsTicketsClosedTodayByLoggedInCloser()
+    {
+        var user = new CurrentUserIdentity(42, "closer.user", null, null);
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var client = new FakeFtmsClient(user,
+        [
+            Closed("RQ-1", now, 42, "closer.user", assigneeId: 10),
+            Closed("RQ-2", now, 99, "other.user", assigneeId: 42),
+            Closed("rq-1", now, 42, "closer.user", assigneeId: 10),
+            Closed("RQ-3", now.AddDays(-1), 42, "closer.user", assigneeId: 42)
+        ]);
+        var monitor = CreateMonitor(client);
+        DashboardSummary? summary = null;
+        monitor.SummaryChanged += value => summary = value;
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Equal(1, summary.PersonalClosedToday);
+    }
+
+    [Fact]
+    public async Task FallsBackToCloserNameOnlyWhenCloserIdIsMissing()
+    {
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var client = new FakeFtmsClient(new CurrentUserIdentity(42, " Closer.User ", null, null),
+        [
+            Closed("RQ-1", now, null, "closer.user", assigneeId: 99),
+            Closed("RQ-2", now, 99, "closer.user", assigneeId: 42)
+        ]);
+        var monitor = CreateMonitor(client);
+        DashboardSummary? summary = null;
+        monitor.SummaryChanged += value => summary = value;
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        Assert.Equal(1, summary?.PersonalClosedToday);
+    }
+
+    private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
+        string? closedByName, long? assigneeId) => new()
+    {
+        Code = code,
+        Status = TicketStatus.Closed,
+        UpdatedAt = closedAt,
+        ClosedAt = closedAt,
+        ClosedByUserId = closedById,
+        ClosedByName = closedByName,
+        AssigneeId = assigneeId,
+        IsTerminal = true
+    };
+
+    private static TicketMonitor CreateMonitor(IFtmsClient client) => new(client, new MemoryStore(),
+        new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+    private sealed class FakeFtmsClient(CurrentUserIdentity? user, IReadOnlyList<TicketSnapshot> tickets) : IFtmsClient
+    {
+        public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken) => Task.FromResult(user);
+        public Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken) => Task.FromResult(tickets);
+        public Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken) =>
+            Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok"));
+        public Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken) => Task.FromResult<LatestEmail?>(null);
+        public Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken) =>
+            Task.FromResult<StatusHistoryEntry?>(null);
+        public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class MemoryStore : ITicketStore
+    {
+        public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyDictionary<string, TicketSnapshot>> LoadActiveSnapshotsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<string, TicketSnapshot>>(new Dictionary<string, TicketSnapshot>());
+        public Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SaveEventAsync(TicketEvent ticketEvent, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> EventExistsAsync(string eventKey, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SaveEventAndEnqueueNotificationAsync(TicketEvent ticketEvent, string? message, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class NullSender : INotificationSender
+    {
+        public Task SendPendingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+}

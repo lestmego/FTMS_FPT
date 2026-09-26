@@ -7,6 +7,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
 {
     private readonly Dictionary<string, TicketSnapshot> _active = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
+    private DateTimeOffset _lastCleanupTime = DateTimeOffset.MinValue;
+    private int _lastCleanupDay = -1;
     public event Action<string>? StatusChanged;
     public event Action<DashboardSummary>? SummaryChanged;
 
@@ -66,10 +68,11 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         foreach (var item in events)
         {
             if (await store.EventExistsAsync(item.EventKey, cancellationToken)) continue;
-            await store.SaveEventAsync(item, cancellationToken);
             _active.TryGetValue(item.TicketCode, out var previous);
-            if (TicketNotificationFilter.ShouldNotify(item, previous))
-                await store.EnqueueNotificationAsync(item, NotificationFormatter.Format(item, ihubBase), cancellationToken);
+            var message = TicketNotificationFilter.ShouldNotify(item, previous)
+                ? NotificationFormatter.Format(item, ihubBase)
+                : null;
+            await store.SaveEventAndEnqueueNotificationAsync(item, message, cancellationToken);
         }
         foreach (var item in tickets)
         {
@@ -104,9 +107,16 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             ? []
             : tickets.Where(x => x.AssigneeId == currentUser.UserId).ToList();
         var vietnamToday = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).Date;
-        var personalClosedToday = currentUser is null ? 0 : apiTickets.Count(x =>
-            x.Status == TicketStatus.Closed && x.AssigneeId == currentUser.UserId && x.UpdatedAt is not null &&
-            x.UpdatedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == vietnamToday);
+        var currentUserName = NormalizeUserName(currentUser?.UserName);
+        var personalClosedToday = currentUser is null ? 0 : apiTickets
+            .Where(x => x.Status == TicketStatus.Closed && x.ClosedAt is not null &&
+                x.ClosedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == vietnamToday &&
+                (x.ClosedByUserId == currentUser.UserId ||
+                 x.ClosedByUserId is null && currentUserName is not null &&
+                 NormalizeUserName(x.ClosedByName) == currentUserName))
+            .Select(x => x.Code)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
         SummaryChanged?.Invoke(new DashboardSummary(
             tickets.Count,
             tickets.Count(x => (x.Status is TicketStatus.New or TicketStatus.Assigned) &&
@@ -125,6 +135,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             personalClosedToday));
         await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
         StatusChanged?.Invoke($"Đồng bộ {tickets.Count} ticket, đang theo dõi {_active.Count}");
+    }
+
+    private static string? NormalizeUserName(string? value)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) || normalized == "---"
+            ? null
+            : normalized.ToUpperInvariant();
     }
 
     private static DashboardSummary UnavailableSummary() => new(0, 0, 0, 0, 0, 0, 0, 0, 0);

@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
+using FTMS.Infrastructure;
 
 namespace FTMS.Desktop;
 
@@ -71,9 +72,13 @@ public partial class CompactSettingsWindow : Window
             }
 
             var body = await response.Content.ReadAsStringAsync();
-            ShowTestStatus($"G\u1eedi th\u1eed th\u1ea5t b\u1ea1i ({(int)response.StatusCode}): {TryGetTelegramError(body)}", false);
+            ShowTestStatus($"G\u1eedi th\u1eed th\u1ea5t b\u1ea1i ({(int)response.StatusCode}): " +
+                TelegramErrorSanitizer.Sanitize(TryGetTelegramError(body), token), false);
         }
-        catch (Exception ex) { ShowTestStatus($"Kh\u00f4ng th\u1ec3 k\u1ebft n\u1ed1i Telegram: {ex.Message}", false); }
+        catch (Exception ex)
+        {
+            ShowTestStatus($"Kh\u00f4ng th\u1ec3 k\u1ebft n\u1ed1i Telegram: {TelegramErrorSanitizer.Sanitize(ex.Message, token)}", false);
+        }
         finally { TestTelegramButton.IsEnabled = true; }
     }
 

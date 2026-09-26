@@ -42,7 +42,11 @@ public sealed class TelegramOutboxSender(string databasePath, Func<(string Token
                 response.EnsureSuccessStatusCode();
                 await MarkSentAndCleanupAsync(connection, item.Id, item.EventKey, ct);
             }
-            catch (Exception ex) { await UpdateFailureAsync(connection, item.Id, ex.Message, item.Attempts + 1, ct); }
+            catch (Exception ex)
+            {
+                await UpdateFailureAsync(connection, item.Id,
+                    TelegramErrorSanitizer.Sanitize(ex.Message, telegram.Token), item.Attempts + 1, ct);
+            }
         }
     }
 

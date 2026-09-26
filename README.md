@@ -20,7 +20,7 @@ Token Telegram, cấu hình người dùng, SQLite và phiên WebView2 được 
 
 ## Telegram qua proxy công ty
 
-Trong **Cài đặt**, nhập **HTTP proxy cho Telegram** theo dạng `http://host:port`, rồi bấm **Gửi thử**. Nếu mạng không cần proxy, để trống ô này. Proxy chỉ áp dụng cho các yêu cầu Telegram của ứng dụng; trang FTMS trong WebView2 vẫn dùng cấu hình mạng của Windows.
+Trong **Cài đặt**, nhập **HTTP proxy cho Telegram** theo dạng `http://host:port`, rồi bấm **Gửi thử**. Nếu mạng không cần proxy, để trống ô này: ứng dụng sẽ kết nối Telegram trực tiếp và không dùng proxy hệ thống của Windows. Nếu có proxy, toàn bộ API Telegram dùng proxy đã nhập; thay đổi có hiệu lực ngay sau khi lưu mà không cần khởi động lại. Proxy chỉ áp dụng cho Telegram, còn trang FTMS trong WebView2 vẫn dùng cấu hình mạng của Windows. Proxy có tài khoản/mật khẩu chưa được hỗ trợ; nếu proxy kiểm tra TLS thì chứng thư gốc của công ty phải được Windows tin cậy.
 
 Nếu máy cũng chạy Telegram Checklist Reporter, có thể lấy `TELEGRAM_PROXY_HOST` và `TELEGRAM_PROXY_PORT` từ `D:\Notification Telegram\config.env` và ghép thành `http://host:port`. Không nhập bot token hoặc API hash của ứng dụng đó vào ô proxy. Sau khi lưu, các thông báo đang chờ trong SQLite sẽ được thử gửi lại khi FTMS còn đăng nhập và đồng bộ thành công.
 
