@@ -143,6 +143,7 @@ public partial class CompactWindow : Window
         ApplyRefreshSettings();
         _telegramTimer.Start();
         FtmsWebView.Source = new Uri(FtmsUrl);
+        MonitorWebView.Source = new Uri(FtmsUrl);
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -179,7 +180,7 @@ public partial class CompactWindow : Window
 
     private async void OnMonitorNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        if (_lifetime.IsCancellationRequested || _ftmsClient is null || _expectedAccountId is null) return;
+        if (_lifetime.IsCancellationRequested || _ftmsClient is null) return;
         if (!e.IsSuccess)
         {
             MonitorText.Text = $"WebView giám sát không mở được FTMS: {e.WebErrorStatus}";
@@ -191,6 +192,7 @@ public partial class CompactWindow : Window
         if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
         {
             _ftmsClient.NotifyTargetReached();
+            if (_expectedAccountId is null) return;
             var expectedAccountId = _expectedAccountId.Value;
             CurrentUserIdentity? hiddenIdentity;
             try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
@@ -213,6 +215,28 @@ public partial class CompactWindow : Window
             try { await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token); }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
             catch (Exception ex) { MonitorText.Text = $"Giám sát FTMS cần đăng nhập: {ex.Message}"; }
+        }
+    }
+
+    private async Task CheckAndStartMonitorFromVisibleIdentityAsync(long expectedAccountId)
+    {
+        if (_lifetime.IsCancellationRequested || _ftmsClient is null) return;
+        var uri = MonitorWebView.Source;
+        if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri)) return;
+
+        CurrentUserIdentity? hiddenIdentity;
+        try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
+        catch { return; }
+
+        if (_expectedAccountId != expectedAccountId) return;
+        if (hiddenIdentity?.UserId == expectedAccountId)
+        {
+            _hiddenReloadAttempts = 0;
+            await StartMonitorOnceAsync(expectedAccountId);
+        }
+        else
+        {
+            MonitorWebView.CoreWebView2?.Reload();
         }
     }
 
@@ -257,6 +281,7 @@ public partial class CompactWindow : Window
                     return;
                 }
                 SetSessionStatus("Đã kết nối", "#4AA47B");
+                UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, visibleIdentity));
                 if (_expectedAccountId != visibleIdentity.UserId)
                 {
                     DeactivateAccount();
@@ -266,7 +291,7 @@ public partial class CompactWindow : Window
                         !WebViewLoginRecovery.IsFtmsIhubUri(MonitorWebView.Source))
                         MonitorWebView.Source = new Uri(FtmsUrl);
                     else
-                        MonitorWebView.CoreWebView2?.Reload();
+                        _ = CheckAndStartMonitorFromVisibleIdentityAsync(visibleIdentity.UserId);
                 }
                 return;
             }

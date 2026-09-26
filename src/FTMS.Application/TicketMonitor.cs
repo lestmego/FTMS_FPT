@@ -64,49 +64,13 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     private async Task PollOnceAsync(CancellationToken cancellationToken)
     {
         var apiTickets = await client.GetTicketsAsync(cancellationToken);
+        var currentUser = await client.GetCurrentUserAsync(cancellationToken);
+
         // Closed history is only relevant when it closes a ticket already being monitored.
         var tickets = apiTickets.Where(item => !item.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
             _active.ContainsKey(item.Code)).ToList();
-        var events = await detector.DetectAsync(_active, tickets, client, settings, cancellationToken);
-        var ihubBase = new Uri(settings.FtmsUrl).GetLeftPart(UriPartial.Authority) + "/ihub";
-        foreach (var item in events)
-        {
-            if (await store.EventExistsAsync(item.EventKey, cancellationToken)) continue;
-            _active.TryGetValue(item.TicketCode, out var previous);
-            var message = TicketNotificationFilter.ShouldNotify(item, previous)
-                ? NotificationFormatter.Format(item, ihubBase)
-                : null;
-            await store.SaveEventAndEnqueueNotificationAsync(item, message, cancellationToken);
-        }
-        foreach (var item in tickets)
-        {
-            var eventEmail = events.LastOrDefault(x => string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase))?.LatestEmail;
-            _active.TryGetValue(item.Code, out var previous);
-            var responseEvent = events.LastOrDefault(x =>
-                string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
-                x.EventType == TicketEventType.StatusChanged && x.CurrentStatus == TicketStatus.InProgress &&
-                x.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase));
-            var keepResponseReminder = item.Status == TicketStatus.InProgress;
-            var snapshot = item with
-            {
-                LatestEmail = eventEmail ?? (previous?.LatestEmail.IsExcluded() == true ? null : previous?.LatestEmail),
-                ResponseReminderEmailId = keepResponseReminder
-                    ? responseEvent?.LatestEmail?.Id ?? previous?.ResponseReminderEmailId
-                    : null,
-                ResponseReminderSince = keepResponseReminder
-                    ? responseEvent?.LatestEmail?.SentAt ?? responseEvent?.DetectedAt ?? previous?.ResponseReminderSince
-                    : null,
-                IsTerminal = item.Status.IsTerminal(settings.UnprocessedIsTerminal)
-            };
-            await store.SaveSnapshotAsync(snapshot, cancellationToken);
-            if (snapshot.IsTerminal)
-            {
-                _active.Remove(snapshot.Code);
-                await store.MarkTerminalAsync(snapshot.Code, DateTimeOffset.Now, cancellationToken);
-            }
-            else _active[snapshot.Code] = snapshot;
-        }
-        var currentUser = await client.GetCurrentUserAsync(cancellationToken);
+
+        // 1. Immediately emit summary for real-time dashboard update
         IReadOnlyList<TicketSnapshot> personal = currentUser is null
             ? []
             : tickets.Where(x => x.AssigneeId == currentUser.UserId).ToList();
@@ -137,6 +101,51 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             personal.Count(x => x.Status == TicketStatus.InProgress),
             personal.Count(x => x.Status == TicketStatus.Paused),
             personalClosedToday));
+
+        // 2. Detect changes & queue notifications (email scraping etc.)
+        var events = await detector.DetectAsync(_active, tickets, client, settings, cancellationToken);
+        var ihubBase = new Uri(settings.FtmsUrl).GetLeftPart(UriPartial.Authority) + "/ihub";
+        foreach (var item in events)
+        {
+            if (await store.EventExistsAsync(item.EventKey, cancellationToken)) continue;
+            _active.TryGetValue(item.TicketCode, out var previous);
+            var message = TicketNotificationFilter.ShouldNotify(item, previous)
+                ? NotificationFormatter.Format(item, ihubBase)
+                : null;
+            await store.SaveEventAndEnqueueNotificationAsync(item, message, cancellationToken);
+        }
+
+        // 3. Batch save snapshots to SQLite in a single transaction
+        var snapshotsToSave = new List<TicketSnapshot>(tickets.Count);
+        foreach (var item in tickets)
+        {
+            var eventEmail = events.LastOrDefault(x => string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase))?.LatestEmail;
+            _active.TryGetValue(item.Code, out var previous);
+            var responseEvent = events.LastOrDefault(x =>
+                string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                x.EventType == TicketEventType.StatusChanged && x.CurrentStatus == TicketStatus.InProgress &&
+                x.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase));
+            var keepResponseReminder = item.Status == TicketStatus.InProgress;
+            var snapshot = item with
+            {
+                LatestEmail = eventEmail ?? (previous?.LatestEmail.IsExcluded() == true ? null : previous?.LatestEmail),
+                ResponseReminderEmailId = keepResponseReminder
+                    ? responseEvent?.LatestEmail?.Id ?? previous?.ResponseReminderEmailId
+                    : null,
+                ResponseReminderSince = keepResponseReminder
+                    ? responseEvent?.LatestEmail?.SentAt ?? responseEvent?.DetectedAt ?? previous?.ResponseReminderSince
+                    : null,
+                IsTerminal = item.Status.IsTerminal(settings.UnprocessedIsTerminal)
+            };
+            snapshotsToSave.Add(snapshot);
+            if (snapshot.IsTerminal)
+            {
+                _active.Remove(snapshot.Code);
+            }
+            else _active[snapshot.Code] = snapshot;
+        }
+        await store.SaveSnapshotsAsync(snapshotsToSave, cancellationToken);
+
         await CheckAndRunDailyCleanupAsync(cancellationToken);
         StatusChanged?.Invoke($"Đồng bộ {tickets.Count} ticket, đang theo dõi {_active.Count}");
     }

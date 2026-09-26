@@ -18,6 +18,7 @@ public interface ITicketStore
     Task InitializeAsync(CancellationToken cancellationToken);
     Task<IReadOnlyDictionary<string, TicketSnapshot>> LoadActiveSnapshotsAsync(CancellationToken cancellationToken);
     Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken cancellationToken);
+    Task SaveSnapshotsAsync(IReadOnlyList<TicketSnapshot> snapshots, CancellationToken cancellationToken);
     Task SaveEventAsync(TicketEvent ticketEvent, CancellationToken cancellationToken);
     Task<bool> EventExistsAsync(string eventKey, CancellationToken cancellationToken);
     Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken);

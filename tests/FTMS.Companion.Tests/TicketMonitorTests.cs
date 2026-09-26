@@ -108,6 +108,7 @@ public sealed class TicketMonitorTests
         public Task<IReadOnlyDictionary<string, TicketSnapshot>> LoadActiveSnapshotsAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyDictionary<string, TicketSnapshot>>(new Dictionary<string, TicketSnapshot>());
         public Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SaveSnapshotsAsync(IReadOnlyList<TicketSnapshot> snapshots, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task SaveEventAsync(TicketEvent ticketEvent, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<bool> EventExistsAsync(string eventKey, CancellationToken cancellationToken) => Task.FromResult(false);
         public Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken) => Task.CompletedTask;
