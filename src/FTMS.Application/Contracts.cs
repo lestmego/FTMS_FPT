@@ -7,6 +7,10 @@ public interface IFtmsClient
     Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken);
     Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(bool includeHistory, CancellationToken cancellationToken) =>
+        GetTicketsAsync(cancellationToken);
+    Task<IReadOnlyList<TicketSnapshot>> GetClosedTicketsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<TicketSnapshot>>([]);
     Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken);
     Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken);
     Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken);

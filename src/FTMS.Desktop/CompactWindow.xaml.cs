@@ -379,7 +379,9 @@ public partial class CompactWindow : Window
             _activeAccountId = accountId;
             _monitorStarted = true;
             MonitorText.Text = "Bắt đầu theo dõi ticket";
-            _ = Task.Run(() => monitor.RunAsync(() => false, accountLifetime.Token));
+            _ = Task.Run(() => monitor.RunAsync(
+                () => DateTimeOffset.UtcNow - _lastUserActivity < TimeSpan.FromSeconds(15),
+                accountLifetime.Token));
         }
         catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
         catch (Exception ex) { MonitorText.Text = $"Không thể khởi tạo giám sát: {ex.Message}"; }
@@ -401,7 +403,16 @@ public partial class CompactWindow : Window
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
     private void OpenFtms(object sender, RoutedEventArgs e) => FtmsWebView.Source = new Uri(FtmsUrl);
-    private async void ReloadFtms(object sender, RoutedEventArgs e) => await RefreshTicketGridAsync(automatic: false);
+    private async void ReloadFtms(object sender, RoutedEventArgs e)
+    {
+        var monitor = _monitor;
+        var accountLifetime = _accountLifetime;
+        if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
+        {
+            _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
+        }
+        await RefreshTicketGridAsync(automatic: false);
+    }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
     private bool IsUserBusy() => _settingsOpen || !_isListPage ||

@@ -6,7 +6,11 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     TicketChangeDetector detector, AppSettings settings)
 {
     private readonly Dictionary<string, TicketSnapshot> _active = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TicketSnapshot> _closedCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _missingMonitoredAttempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
+    private DateTimeOffset _lastHistoryFetch = DateTimeOffset.MinValue;
+    private bool _forceHistoryNext = true;
     private DateTimeOffset _lastCleanupTime = DateTimeOffset.MinValue;
     private int _lastCleanupDay = -1;
     public event Action<string>? StatusChanged;
@@ -50,25 +54,112 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         }
     }
 
-    public async Task SyncNowAsync(CancellationToken cancellationToken)
+    public Task SyncNowAsync(CancellationToken cancellationToken) =>
+        SyncNowAsync(forceHistory: false, cancellationToken);
+
+    public async Task SyncNowAsync(bool forceHistory, CancellationToken cancellationToken)
     {
+        if (forceHistory) _forceHistoryNext = true;
         if (!await _syncLock.WaitAsync(0, cancellationToken)) return;
         try
         {
-            await PollOnceAsync(cancellationToken);
+            var includeHistory = _forceHistoryNext;
+            _forceHistoryNext = false;
+            await PollOnceAsync(includeHistory, cancellationToken);
             await sender.SendPendingAsync(cancellationToken);
         }
         finally { _syncLock.Release(); }
     }
 
-    private async Task PollOnceAsync(CancellationToken cancellationToken)
+    private async Task PollOnceAsync(bool forceHistoryUpfront, CancellationToken cancellationToken)
     {
-        var apiTickets = await client.GetTicketsAsync(cancellationToken);
+        var historyDue = forceHistoryUpfront ||
+            _lastHistoryFetch == DateTimeOffset.MinValue ||
+            (DateTimeOffset.UtcNow - _lastHistoryFetch) >= TimeSpan.FromSeconds(Math.Max(10, settings.HistoryIntervalSeconds));
+
+        var apiTickets = await client.GetTicketsAsync(includeHistory: historyDue, cancellationToken);
         var currentUser = await client.GetCurrentUserAsync(cancellationToken);
+
+        if (historyDue)
+        {
+            _lastHistoryFetch = DateTimeOffset.UtcNow;
+            foreach (var item in apiTickets.Where(x => x.Status == TicketStatus.Closed))
+            {
+                _closedCache[item.Code] = item;
+            }
+        }
+
+        var activeCodes = new HashSet<string>(apiTickets.Select(x => x.Code), StringComparer.OrdinalIgnoreCase);
+        var missingMonitored = _active.Keys.Where(code => !activeCodes.Contains(code)).ToList();
+
+        if (missingMonitored.Count > 0 && !historyDue)
+        {
+            var needHistoryProbe = missingMonitored.Any(code =>
+                !_missingMonitoredAttempts.TryGetValue(code, out var attempts) || attempts <= 2);
+
+            if (needHistoryProbe)
+            {
+                var closedTickets = await client.GetClosedTicketsAsync(cancellationToken);
+                _lastHistoryFetch = DateTimeOffset.UtcNow;
+                foreach (var item in closedTickets)
+                {
+                    _closedCache[item.Code] = item;
+                }
+            }
+
+            foreach (var code in missingMonitored)
+            {
+                _missingMonitoredAttempts[code] = _missingMonitoredAttempts.TryGetValue(code, out var count) ? count + 1 : 1;
+            }
+        }
+
+        foreach (var code in activeCodes)
+        {
+            _missingMonitoredAttempts.Remove(code);
+        }
 
         // Closed history is only relevant when it closes a ticket already being monitored.
         var tickets = apiTickets.Where(item => !item.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
             _active.ContainsKey(item.Code)).ToList();
+
+        foreach (var activeCode in _active.Keys)
+        {
+            if (tickets.Any(x => string.Equals(x.Code, activeCode, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            if (_closedCache.TryGetValue(activeCode, out var closedSnapshot))
+            {
+                tickets.Add(closedSnapshot);
+            }
+            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) && attempts > 3)
+            {
+                try
+                {
+                    var history = await client.GetLatestStatusHistoryAsync(activeCode, TicketStatus.Closed, cancellationToken);
+                    var fallbackClosed = _active[activeCode] with
+                    {
+                        Status = TicketStatus.Closed,
+                        UpdatedAt = history?.OccurredAt ?? DateTimeOffset.UtcNow,
+                        ClosedAt = history?.OccurredAt ?? DateTimeOffset.UtcNow,
+                        ClosedByName = history?.Actor,
+                        IsTerminal = true
+                    };
+                    tickets.Add(fallbackClosed);
+                    _closedCache[activeCode] = fallbackClosed;
+                }
+                catch
+                {
+                    var syntheticClosed = _active[activeCode] with
+                    {
+                        Status = TicketStatus.Closed,
+                        UpdatedAt = DateTimeOffset.UtcNow,
+                        ClosedAt = DateTimeOffset.UtcNow,
+                        IsTerminal = true
+                    };
+                    tickets.Add(syntheticClosed);
+                }
+            }
+        }
 
         // 1. Immediately emit summary for real-time dashboard update
         IReadOnlyList<TicketSnapshot> personal = currentUser is null
@@ -76,7 +167,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             : tickets.Where(x => x.AssigneeId == currentUser.UserId).ToList();
         var vietnamToday = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).Date;
         var currentUserName = NormalizeUserName(currentUser?.UserName);
-        var personalClosedToday = currentUser is null ? 0 : apiTickets
+        var personalClosedToday = currentUser is null ? 0 : _closedCache.Values
             .Where(x => x.Status == TicketStatus.Closed && x.ClosedAt is not null &&
                 x.ClosedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == vietnamToday &&
                 (x.ClosedByUserId == currentUser.UserId ||
@@ -141,6 +232,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             if (snapshot.IsTerminal)
             {
                 _active.Remove(snapshot.Code);
+                _missingMonitoredAttempts.Remove(snapshot.Code);
+                if (snapshot.Status == TicketStatus.Closed) _closedCache[snapshot.Code] = snapshot;
             }
             else _active[snapshot.Code] = snapshot;
         }
@@ -161,6 +254,13 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             await store.CleanupAsync(settings.TerminalRetentionDays, cancellationToken);
             _lastCleanupDay = currentDay;
             _lastCleanupTime = vietnamNow;
+
+            var cutoff = vietnamNow.Date.AddDays(-1);
+            var expired = _closedCache.Where(kvp => kvp.Value.ClosedAt is not null &&
+                kvp.Value.ClosedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date < cutoff)
+                .Select(kvp => kvp.Key).ToList();
+            foreach (var key in expired) _closedCache.Remove(key);
+
             DailyCleanupCompleted?.Invoke();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

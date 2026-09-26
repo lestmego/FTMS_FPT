@@ -48,9 +48,46 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         finally { _identityLock.Release(); }
     }
 
-    public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken)
+    public Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken) =>
+        GetTicketsAsync(includeHistory: false, cancellationToken);
+
+    public async Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(bool includeHistory, CancellationToken cancellationToken)
     {
-        const string script = """
+        var script = BuildTicketsScript(includeActive: true, includeHistory: includeHistory);
+        return await ExecuteTicketsQueryAsync(script, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<TicketSnapshot>> GetClosedTicketsAsync(CancellationToken cancellationToken)
+    {
+        var script = BuildTicketsScript(includeActive: false, includeHistory: true);
+        return await ExecuteTicketsQueryAsync(script, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TicketSnapshot>> ExecuteTicketsQueryAsync(string script, CancellationToken cancellationToken)
+    {
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (root.ValueKind == JsonValueKind.String)
+        {
+            using var nested = JsonDocument.Parse(root.GetString() ?? "null");
+            root = nested.RootElement.Clone();
+        }
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error))
+        {
+            var message = error.GetString() ?? "Không thể đọc API FTMS";
+            if (message.Contains("401", StringComparison.OrdinalIgnoreCase) || message.Contains("403", StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException(message);
+            throw new InvalidOperationException(message);
+        }
+        return DeserializeTickets(root.GetRawText());
+    }
+
+    private static string BuildTicketsScript(bool includeActive, bool includeHistory)
+    {
+        var activeFlag = includeActive ? "true" : "false";
+        var historyFlag = includeHistory ? "true" : "false";
+        return $$"""
             (async () => {
               const unwrap = (value, depth = 0) => {
                 if (depth > 8 || value == null) return [];
@@ -268,17 +305,37 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               let tickets = [];
               let closedTickets = [];
               try {
-                const [activeResult, historyResult] = await Promise.allSettled([fetchActive(), fetchHistory()]);
-                if (activeResult.status !== 'fulfilled') {
-                  const message = String(activeResult.reason?.message || activeResult.reason || '');
-                  return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
+                const tasks = [];
+                if ({{activeFlag}}) tasks.push(fetchActive());
+                if ({{historyFlag}}) tasks.push(fetchHistory());
+                const results = await Promise.allSettled(tasks);
+                let resultIdx = 0;
+                if ({{activeFlag}}) {
+                  const activeResult = results[resultIdx++];
+                  if (activeResult.status !== 'fulfilled') {
+                    const message = String(activeResult.reason?.message || activeResult.reason || '');
+                    return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
+                  }
+                  tickets = activeResult.value;
                 }
-                tickets = activeResult.value;
-                if (historyResult.status === 'fulfilled') {
-                  closedTickets = historyResult.value;
+                if ({{historyFlag}}) {
+                  const historyResult = results[resultIdx++];
+                  if (historyResult.status === 'fulfilled') {
+                    closedTickets = historyResult.value;
+                  } else if (!{{activeFlag}}) {
+                    const message = String(historyResult.reason?.message || historyResult.reason || '');
+                    return JSON.stringify({ error: message.includes('401') ? 'FTMS history HTTP 401' : (message || 'Lỗi đọc lịch sử đóng ticket FTMS') });
+                  }
                 }
               } catch (error) {
                 return JSON.stringify({ error: String(error) });
+              }
+
+              if (!{{historyFlag}}) {
+                return JSON.stringify({ data: tickets, count: tickets.length });
+              }
+              if (!{{activeFlag}}) {
+                return JSON.stringify({ data: closedTickets, count: closedTickets.length });
               }
 
               // Prefer the newest authoritative representation. A newer active row means the ticket
@@ -302,22 +359,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               return JSON.stringify({ data: allTickets, count: allTickets.length });
             })()
             """;
-        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
-        using var document = JsonDocument.Parse(json);
-        var root = document.RootElement;
-        if (root.ValueKind == JsonValueKind.String)
-        {
-            using var nested = JsonDocument.Parse(root.GetString() ?? "null");
-            root = nested.RootElement.Clone();
-        }
-        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error))
-        {
-            var message = error.GetString() ?? "Không thể đọc API FTMS";
-            if (message.Contains("401", StringComparison.OrdinalIgnoreCase) || message.Contains("403", StringComparison.OrdinalIgnoreCase))
-                throw new UnauthorizedAccessException(message);
-            throw new InvalidOperationException(message);
-        }
-        return DeserializeTickets(root.GetRawText());
     }
 
     public async Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken)
